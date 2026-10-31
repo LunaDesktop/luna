@@ -263,6 +263,52 @@ pub fn scan() -> Vec<DesktopApp> {
     apps
 }
 
+/// Znacznik stanu katalogów `applications/` (mtime i rozmiar plików `.desktop`).
+///
+/// Powłoka porównuje go co klatkę i wznawia skanowanie, gdy zmieni się zestaw
+/// zainstalowanych aplikacji — np. zaraz po instalacji pakietu w Sklepie.
+/// Liczymy tylko metadane, a nie pełne parsowanie plików.
+pub fn stamp() -> u64 {
+    stamp_of(&application_dirs())
+}
+
+/// Wariant [`stamp`] dla jawnie podanych katalogów (testowalny bez zmiany `XDG_*`).
+fn stamp_of(dirs: &[PathBuf]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |value: u64| {
+        hash ^= value;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for dir in dirs {
+        if let Ok(meta) = std::fs::metadata(dir) {
+            mix(modified_nanos(&meta));
+        }
+        let mut files = desktop_files(dir, 0);
+        files.sort();
+        for path in files {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            mix(modified_nanos(&meta));
+            mix(meta.len());
+            if let Some(name) = path.file_name() {
+                for byte in name.to_string_lossy().bytes() {
+                    mix(u64::from(byte));
+                }
+            }
+        }
+    }
+    hash
+}
+
+fn modified_nanos(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
 /// Katalogi `applications/` w kolejności priorytetu (użytkownik pierwszy).
 fn application_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -822,5 +868,29 @@ Categories=Network;WebBrowser;
             IconName::Calculator
         );
         assert_eq!(icon_for(&mk("Utility;", "Costam")), IconName::App);
+    }
+
+    #[test]
+    fn stamp_changes_when_an_application_is_installed() {
+        let base = std::env::temp_dir().join(format!(
+            "luna-apps-stamp-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let before = stamp_of(std::slice::from_ref(&base));
+        let entry = "[Desktop Entry]\nType=Application\nName=Firefox\nExec=firefox\n";
+        std::fs::write(base.join("firefox.desktop"), entry).unwrap();
+        let after = stamp_of(std::slice::from_ref(&base));
+        assert_ne!(before, after, "nowy plik .desktop musi zmienić znacznik");
+        assert_eq!(
+            after,
+            stamp_of(std::slice::from_ref(&base)),
+            "znacznik musi być stabilny bez zmian"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

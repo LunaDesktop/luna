@@ -13,6 +13,7 @@
 
 use std::error::Error;
 
+use libluna_core::clock_state::{ClockActivity, StopwatchActivity, TimerActivity};
 use libluna_core::{Color, IconTheme, Rect, Size, Theme};
 use libluna_render::{gpu::GpuRenderer, Renderer, Scene, SoftwareRenderer, TextEngine};
 use libluna_widgets::{Hover, IconName, PaintCtx};
@@ -153,8 +154,61 @@ fn main() -> Result<(), Box<dyn Error>> {
             8,
             Some(8),
             &calendar_events,
+            "PL",
             true,
         );
+    })?;
+
+    // Kalendarz panelu ze świętami (listopad: Wszystkich Świętych i 11 listopada).
+    save(
+        &theme,
+        "docs/images/luna-popup-calendar-holidays.png",
+        |ctx| {
+            panel::paint_panel(&st, &hover, ctx, bar);
+            let r = panel::calendar_popup_rect(bar, ctx.theme);
+            panel::paint_calendar_popup_with_events(
+                ctx,
+                r,
+                &st.clock,
+                &st.date,
+                2026,
+                11,
+                2026,
+                10,
+                8,
+                Some(1),
+                &[],
+                "PL",
+                true,
+            );
+        },
+    )?;
+
+    // Widget aktywnego minutnika/stopera pod paskiem (aplikacja zamknięta).
+    save(&theme, "docs/images/luna-clock-widget.png", |ctx| {
+        panel::paint_panel(&st, &hover, ctx, bar);
+        let now = libluna_core::clock_state::now_unix();
+        let activity = ClockActivity {
+            pid: None,
+            updated_unix: now,
+            timer: Some(TimerActivity {
+                total_secs: 1_500,
+                running: true,
+                end_unix: now + 17 * 60 + 42,
+                remaining_secs: 0,
+                finished: false,
+            }),
+            stopwatch: Some(StopwatchActivity {
+                elapsed_millis: 83_400,
+                running: true,
+                updated_unix: now,
+                laps: Vec::new(),
+            }),
+        };
+        let area = Size::new(W as f64, H as f64);
+        if let Some(rect) = luna::clock_widget::visible_rect(area, &activity, now) {
+            luna::clock_widget::paint(ctx, rect, &activity, now, false);
+        }
     })?;
 
     save(&theme, "docs/images/luna-popup-session.png", |ctx| {
@@ -202,6 +256,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             8,
             Some(8),
             &calendar_events,
+            "PL",
             true,
         );
         let nrect = panel::notification_center_rect(bar, ctx.theme, notes.history_len());

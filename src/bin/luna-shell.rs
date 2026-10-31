@@ -2,6 +2,8 @@
 ///
 /// Interakcja:
 /// - Klik w **burger** otwiera płynnie launcher (wysuwany z góry z przyciemnieniem tła).
+///   **PPM na aplikacji** otwiera menu kontekstowe (ulubione, administrator, kopiowanie
+///   polecenia, odinstalowanie przez Sklep); nowe pakiety pojawiają się bez restartu.
 /// - Klik w **zegar** na środku paska otwiera wysuwany kalendarz oraz **centrum
 ///   powiadomień** (historia, „Wyczyść”, tryb „nie przeszkadzać”).
 /// - Ikony **tray’a** (StatusNotifierItem) obsługują lewy/środkowy/prawy klik;
@@ -14,10 +16,12 @@ use std::error::Error;
 use std::process::Command;
 use std::time::Instant;
 
+use libluna_core::clock_state::{self, ClockActivity};
 use libluna_core::{ButtonState, Event, IconSettings, PointerButton, Rect, ThemePreference};
 use libluna_platform::{run, AppConfig, Frame, InputRegion, LayerConfig};
 use libluna_widgets::{Hover, IconName, PaintCtx};
 use luna::calendar;
+use luna::clock_widget;
 use luna::dbus_notifications::{Incoming, NotificationsBus};
 use luna::notifications::{load_placement, Notification, Notifications};
 use luna::osd::Osd;
@@ -67,6 +71,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut launcher = Launcher::new();
     // Przypięte i ostatnio używane aplikacje przetrwają przelogowanie.
     luna::launcher_conf::load_into(&mut launcher);
+    // Monitor prywatności: stan czytamy z pliku runtime (daemon `luna-security`).
+    let mut security_snapshot = luna::security::load_snapshot();
+    let mut security_stamp = luna::security::state_stamp();
+    let mut security_check = Instant::now();
+    let mut security_hover: Option<panel::SecurityChoice> = None;
+    // Menu kontekstowe aplikacji w launcherze (PPM) — otwierane nad aktywnym launcherm.
+    let mut app_menu: Option<AppMenuState> = None;
+    let mut app_menu_hover: Option<usize> = None;
+    // Znacznik katalogów `.desktop` — po instalacji pakietu lista aplikacji
+    // odświeża się sama, bez restartu powłoki.
+    let mut apps_stamp = luna::apps::stamp();
+    let mut apps_checked = Instant::now();
     // Jedno miejsce śledzenia kursora dla paska, launchera i wszystkich popupów.
     let mut hover = Hover::new();
 
@@ -81,7 +97,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut tray_context: Option<TrayContextState> = None;
     // Wiersz centrum powiadomień pod kursorem (podświetlenie).
     let mut notify_hover: Option<usize> = None;
-    let mut last_menu_sig: (usize, usize, usize) = (0, 0, 0);
+    let mut last_menu_sig = Default::default();
     // Diagnostyka (`LUNA_STATS=1`): zmiany otwartego popupu (launcher, sieć, dźwięk…).
     let mut logged_popup = ActivePopup::None;
 
@@ -94,6 +110,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Wydarzenia z `luna-clock` (tylko odczyt; plik jest lokalny).
     let mut calendar_events = calendar::load_events();
     let mut calendar_stamp = calendar::stamp();
+    let mut holiday_country = calendar::preferred_country();
+    // Aktywny minutnik/stoper zapisany przez `luna-clock` — widget pod paskiem.
+    let mut clock_activity: Option<ClockActivity> = ClockActivity::load();
+    let mut clock_activity_stamp = clock_state::stamp();
+    let mut clock_widget_hover = false;
+    let mut notified_timer_end: Option<i64> = None;
     // Harmonogram motywu z `luna-clock` działa również przy zamkniętej aplikacji.
     let mut theme_schedule = ThemeSchedule::load();
     let mut theme_schedule_stamp = ThemeSchedule::stamp();
@@ -187,10 +209,41 @@ fn main() -> Result<(), Box<dyn Error>> {
         let dt = frame.delta_time();
         let t_frame = Instant::now();
 
+        // Stan bezpieczeństwa czytamy najwyżej co 500 ms; plik jest mały, a mtime
+        // pozwala pominąć odświeżanie, gdy daemon nic nie zmienił.
+        if Instant::now() >= security_check {
+            security_check = Instant::now() + std::time::Duration::from_millis(500);
+            let stamp = luna::security::state_stamp();
+            if stamp != security_stamp {
+                security_stamp = stamp;
+                security_snapshot = luna::security::load_snapshot();
+                if security_snapshot.prompts.is_empty() {
+                    security_hover = None;
+                }
+            }
+        }
+        let security_modal = !security_snapshot.prompts.is_empty();
+        state.security = panel::SecurityIndicators {
+            microphone: security_snapshot.active(luna::security::Capability::Microphone),
+            camera: security_snapshot.active(luna::security::Capability::Camera),
+            network: security_snapshot
+                .prompts
+                .iter()
+                .any(|p| p.capability == luna::security::Capability::Network)
+                || security_snapshot.activities.iter().any(|a| {
+                    a.caps.contains(&luna::security::Capability::Network)
+                        && a.status != luna::security::Status::Allowed
+                }),
+            alert: security_snapshot.alert(),
+        };
+
         // Podświetlenie pozycji pod kursorem w launcherze/popupie wymaga reakcji na
         // ruch myszy. Włączamy to tylko, gdy coś jest otwarte — w spoczynku ruch
         // kursora nie wywołuje wtedy żadnych commitów bufora (patrz `libluna-platform`).
-        frame.set_motion_redraw(animating_popup != ActivePopup::None && target_progress > 0.0);
+        frame.set_motion_redraw(
+            (animating_popup != ActivePopup::None && target_progress > 0.0)
+                || !security_snapshot.prompts.is_empty(),
+        );
 
         if !bus_started {
             bus_started = true;
@@ -293,13 +346,31 @@ fn main() -> Result<(), Box<dyn Error>> {
             ui_language = language;
             // Nazwy aplikacji pochodzą z `Name[lang]` w plikach `.desktop` —
             // po zmianie języka trzeba je wczytać ponownie.
-            let desktop = luna::apps::scan();
-            if !desktop.is_empty() {
-                luna::apps::refresh_icon_names();
-                apps = App::from_desktop(&desktop);
-                launcher.selected = None;
-                launcher.scroll = 0.0;
-                launcher.carousel = 0;
+            if reload_apps(&mut apps, &mut launcher, true) {
+                apps_stamp = luna::apps::stamp();
+                app_menu = None;
+                app_menu_hover = None;
+            }
+        }
+
+        // Instalacja pakietu w Sklepie dopisuje plik `.desktop` — porównujemy tani
+        // znacznik katalogów i przebudowujemy listę bez restartu powłoki. Sprawdzamy
+        // najwyżej raz na sekundę, żeby nie statować setek plików co klatkę.
+        if Instant::now() >= apps_checked {
+            apps_checked = Instant::now() + std::time::Duration::from_secs(1);
+            let stamp = luna::apps::stamp();
+            if stamp != apps_stamp {
+                apps_stamp = stamp;
+                if reload_apps(&mut apps, &mut launcher, false) {
+                    app_menu = None;
+                    app_menu_hover = None;
+                    if stats {
+                        eprintln!(
+                            "luna-shell: odświeżono listę aplikacji ({} pozycji)",
+                            apps.len()
+                        );
+                    }
+                }
             }
         }
 
@@ -315,10 +386,62 @@ fn main() -> Result<(), Box<dyn Error>> {
             calendar_events = calendar::load_events();
         }
 
+        let activity_stamp = clock_state::stamp();
+        if activity_stamp != clock_activity_stamp {
+            clock_activity_stamp = activity_stamp;
+            clock_activity = ClockActivity::load();
+        }
+        let clock_now = clock_state::now_unix();
+        let clock_widget_rect = if animating_popup == ActivePopup::None || target_progress <= 0.0 {
+            clock_activity
+                .as_ref()
+                .and_then(|activity| clock_widget::visible_rect(frame.size, activity, clock_now))
+        } else {
+            None
+        };
+
+        // Minutnik zamkniętej aplikacji właśnie się skończył — pokaż lokalne powiadomienie.
+        // Zakończony minutnik znika z widgetu (trafia do historii powiadomień).
+        if clock_activity
+            .as_ref()
+            .is_some_and(|activity| !activity.is_app_running())
+        {
+            if let Some(timer) = clock_activity.as_ref().and_then(|a| a.timer.as_ref()) {
+                if timer.running
+                    && timer.end_unix <= clock_now
+                    && notified_timer_end != Some(timer.end_unix)
+                {
+                    let notification =
+                        Notification::new("Luna Clock", libluna_i18n::tr("Timer finished"), "")
+                            .with_icon(IconName::Clock);
+                    if dnd {
+                        notes.record(notification);
+                    } else {
+                        notes.push(notification);
+                    }
+                    notified_timer_end = Some(timer.end_unix);
+                }
+            }
+
+            // Zakończony minutnik znika także ze stanu widgetu — zostaje w powiadomieniach.
+            if let Some(activity) = clock_activity.as_mut() {
+                if activity
+                    .timer
+                    .as_ref()
+                    .is_some_and(|timer| timer.is_finished(clock_now))
+                {
+                    activity.timer = None;
+                    let _ = activity.save();
+                }
+            }
+        }
+
         let schedule_stamp = ThemeSchedule::stamp();
         if schedule_stamp != theme_schedule_stamp {
             theme_schedule_stamp = schedule_stamp;
             theme_schedule = ThemeSchedule::load();
+            // Ten sam `clock.conf` wybiera kraj świąt w panelu.
+            holiday_country = calendar::preferred_country();
         }
         theme_schedule.apply(luna::theme_schedule::current_hour());
 
@@ -449,6 +572,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         let burger = panel::burger_rect(bar, &frame.theme);
         let clock_r = panel::clock_rect(bar, &frame.theme, text, &state);
 
+        // Tekst do schowka z menu aplikacji — kopiujemy **po** zdarzeniach, żeby nie
+        // kolidować z pożyczonym motywem/sceną bieżącej klatki.
+        let mut clipboard_pending: Option<String> = None;
+
         // ── Obsługa zdarzeń wejścia ──
         for ev in frame.events {
             hover.handle_event(ev);
@@ -456,13 +583,73 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Kursor opuścił powierzchnię — czyścimy też hover listy aplikacji.
                 Event::PointerLeave => {
                     launcher.hover = None;
+                    app_menu_hover = None;
+                    security_hover = None;
+                    clock_widget_hover = false;
                 }
-                // ESC zamyka dowolne otwarte menu/launcher
+                // ESC zamyka najpierw modal bezpieczeństwa (odmowa), potem menu/launcher.
                 Event::Key(ke) if ke.state == ButtonState::Pressed && ke.keysym == 0xff1b => {
-                    if animating_popup == ActivePopup::Launcher && !launcher.search.is_empty() {
+                    if let Some(prompt) = security_snapshot.prompts.first() {
+                        // Zamknięcie modalna = bezpieczna odmowa; decyzja zostaje zapisana.
+                        let _ = luna::security::decide(&prompt.id, false);
+                        security_hover = None;
+                    } else if app_menu.is_some() {
+                        app_menu = None;
+                        app_menu_hover = None;
+                    } else if animating_popup == ActivePopup::Launcher
+                        && !launcher.search.is_empty()
+                    {
                         launcher.clear_search();
                     } else if animating_popup != ActivePopup::None {
                         target_progress = 0.0;
+                    }
+                }
+
+                // Gdy wisi modal zgody, klawiatura nie może sterować launcherem pod spodem.
+                Event::Key(ke)
+                    if ke.state == ButtonState::Pressed
+                        && !security_snapshot.prompts.is_empty() =>
+                {
+                    let _ = ke;
+                }
+
+                // Klawiatura w menu kontekstowym aplikacji: strzałki wybierają
+                // pozycję, Enter ją uruchamia, Esc (wyżej) zamyka menu.
+                Event::Key(ke)
+                    if ke.state == ButtonState::Pressed
+                        && app_menu.is_some()
+                        && target_progress > 0.0 =>
+                {
+                    match ke.keysym {
+                        0xff52 | 0xff54 => {
+                            let step = if ke.keysym == 0xff52 { -1 } else { 1 };
+                            if let Some(menu) = &app_menu {
+                                app_menu_hover = app_menu_step(&menu.rows, app_menu_hover, step);
+                            }
+                        }
+                        0xff0d | 0xff8d => {
+                            if let (Some(menu), Some(row)) = (&app_menu, app_menu_hover) {
+                                if let (Some(action), Some(app)) = (
+                                    menu.rows.get(row).and_then(|r| r.action),
+                                    apps.get(menu.app),
+                                ) {
+                                    match perform_app_menu(action, app, &mut launcher) {
+                                        AppMenuEffect::CopyCommand(text) => {
+                                            clipboard_pending = Some(text)
+                                        }
+                                        AppMenuEffect::CloseLauncher => target_progress = 0.0,
+                                        AppMenuEffect::None => {}
+                                    }
+                                }
+                            }
+                            app_menu = None;
+                            app_menu_hover = None;
+                        }
+                        // Każdy inny klawisz zamyka menu i nie wpada do wyszukiwania.
+                        _ => {
+                            app_menu = None;
+                            app_menu_hover = None;
+                        }
                     }
                 }
 
@@ -547,6 +734,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // `se.dy` jest w jednostkach powierzchni (jeden ząbek kółka = `SCROLL_UNIT`).
                 // Lista/siatka przewija się płynnie w pikselach; karuzela skacze o kartę.
                 Event::Scroll(se) => {
+                    // Modal zgody blokuje przewijanie treści pod spodem.
+                    if !security_snapshot.prompts.is_empty() {
+                        let _ = se;
+                        continue;
+                    }
+                    // Przewinięcie listy zmienia położenie kafli — menu PPM traci kotwicę.
+                    if app_menu.is_some() {
+                        app_menu = None;
+                        app_menu_hover = None;
+                    }
                     let notches = se.dy / SCROLL_UNIT;
                     let vertical = se.dy.abs() >= se.dx.abs();
                     let dir = if vertical { se.dy } else { se.dx };
@@ -640,6 +837,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
+                // Modal zgody: podświetlenie przycisków.
+                Event::PointerMotion { position, .. } if !security_snapshot.prompts.is_empty() => {
+                    let layout = panel::security_dialog_layout(size, &frame.theme);
+                    security_hover = panel::security_dialog_hit(layout, *position);
+                }
+
+                // Ruch kursora nad menu aplikacji — podświetlamy pozycję.
+                Event::PointerMotion { position, .. } if app_menu.is_some() => {
+                    if let Some(menu) = &app_menu {
+                        app_menu_hover = panel::app_menu_item_at(menu.rect, &menu.rows, *position);
+                    }
+                }
+
                 // Ruch kursora nad launcherem — podświetlamy pozycję pod wskaźnikiem.
                 // Hover jest **niezależny** od zaznaczenia klawiatury (`selected`), więc
                 // strzałki nie przeskakują, gdy tylko przesuniemy mysz.
@@ -687,8 +897,36 @@ fn main() -> Result<(), Box<dyn Error>> {
                     };
                 }
 
-                // PPM na aplikacji w launcherze — przypnij/odepnij ją do góry listy.
-                // Launcher zostaje otwarty, żeby użytkownik widział nową kolejność.
+                // Modal zgody bezpieczeństwa ma pierwszeństwo przed resztą wejścia.
+                Event::PointerButton(pe)
+                    if pe.state == ButtonState::Pressed
+                        && pe.button == PointerButton::Left
+                        && !security_snapshot.prompts.is_empty() =>
+                {
+                    let layout = panel::security_dialog_layout(size, &frame.theme);
+                    if let (Some(choice), Some(prompt)) = (
+                        panel::security_dialog_hit(layout, pe.position),
+                        security_snapshot.prompts.first(),
+                    ) {
+                        let _ = luna::security::decide(
+                            &prompt.id,
+                            choice == panel::SecurityChoice::Allow,
+                        );
+                        security_hover = None;
+                    }
+                }
+
+                // PPM/inne przyciski nie przebijają modalna zgody.
+                Event::PointerButton(pe)
+                    if pe.state == ButtonState::Pressed
+                        && pe.button != PointerButton::Left
+                        && !security_snapshot.prompts.is_empty() =>
+                {
+                    let _ = pe;
+                }
+
+                // PPM na aplikacji w launcherze — menu kontekstowe (ulubione, administrator,
+                // Sklep/odinstalowanie, kopiowanie polecenia). Launcher zostaje otwarty.
                 // **Musi być przed** ogólnym PPM taskbara (ten zamyka każdy popup).
                 Event::PointerButton(pe)
                     if pe.state == ButtonState::Pressed
@@ -704,17 +942,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                         text,
                         pe.position,
                     ) {
-                        let pinned = launcher.toggle_pin(&apps[i]);
-                        luna::launcher_conf::save_from(&launcher);
-                        if stats {
-                            eprintln!(
-                                "luna-shell: {} {:?}",
-                                if pinned { "przypięto" } else { "odpięto" },
-                                apps[i].name
-                            );
+                        if let Some(anchor) =
+                            panel::launcher_app_rect(&apps, &launcher, larea, &frame.theme, text, i)
+                        {
+                            let rows = app_menu_rows(&apps[i], launcher.is_pinned(&apps[i]));
+                            let bounds = Rect::from_xywh(0.0, 0.0, size.width, size.height);
+                            let rect = panel::app_menu_rect(anchor, &rows, bounds, &frame.theme);
+                            app_menu = Some(AppMenuState { app: i, rect, rows });
+                            app_menu_hover = None;
+                            if stats {
+                                eprintln!("luna-shell: menu aplikacji {:?}", apps[i].name);
+                            }
                         }
+                    } else if larea.contains(pe.position) {
+                        // PPM na pustym tle launchera tylko zamyka menu.
+                        app_menu = None;
+                        app_menu_hover = None;
                     } else {
-                        // PPM poza aplikacją zamyka launcher (jak dotychczas).
+                        // PPM poza launcherem zamyka menu i launcher.
+                        app_menu = None;
+                        app_menu_hover = None;
                         target_progress = 0.0;
                     }
                 }
@@ -839,11 +1086,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                     target_progress = 0.0;
                 }
 
+                Event::PointerMotion { position, .. } => {
+                    clock_widget_hover =
+                        clock_widget_rect.is_some_and(|rect| rect.contains(*position));
+                }
+
                 // Lewy przycisk myszy
                 Event::PointerButton(pe)
                     if pe.state == ButtonState::Pressed && pe.button == PointerButton::Left =>
                 {
                     let pos = pe.position;
+                    // Widget aktywnego licznika otwiera aplikację na właściwej stronie.
+                    if let Some(rect) = clock_widget_rect {
+                        if rect.contains(pos) {
+                            if let Some(activity) = &clock_activity {
+                                open_clock_activity(activity, clock_now);
+                            }
+                            continue;
+                        }
+                    }
                     let in_bar = pos.y >= bar.y() && pos.y <= bar.bottom();
                     let is_burger = in_bar && pos.x >= bar.x() && pos.x <= burger.right() + 8.0;
                     let is_clock =
@@ -1064,7 +1325,34 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             ActivePopup::Launcher => {
-                                if !launcher.search.is_empty()
+                                if let Some(menu) = app_menu.take() {
+                                    app_menu_hover = None;
+                                    let inside_menu = menu.rect.contains(pos);
+                                    let mut clicked = false;
+                                    if let Some(row) =
+                                        panel::app_menu_item_at(menu.rect, &menu.rows, pos)
+                                    {
+                                        if let (Some(action), Some(app)) =
+                                            (menu.rows[row].action, apps.get(menu.app))
+                                        {
+                                            clicked = true;
+                                            match perform_app_menu(action, app, &mut launcher) {
+                                                AppMenuEffect::CopyCommand(text) => {
+                                                    clipboard_pending = Some(text)
+                                                }
+                                                AppMenuEffect::CloseLauncher => {
+                                                    target_progress = 0.0
+                                                }
+                                                AppMenuEffect::None => {}
+                                            }
+                                        }
+                                    }
+                                    // Klik poza menu i poza launcherem zamyka całość.
+                                    if !clicked && !inside_menu && !larea.contains(pos) {
+                                        target_progress = 0.0;
+                                    }
+                                    handled = true;
+                                } else if !launcher.search.is_empty()
                                     && panel::launcher_search_clear_at(
                                         larea,
                                         &frame.theme,
@@ -1187,6 +1475,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                         Some(panel::NotificationHit::Row(row)) => {
                                             let idx = notes.history_len().saturating_sub(1 + row);
+                                            let mut open = None;
                                             if let Some(n) = notes.history_get(idx) {
                                                 let id = n.id;
                                                 if id != 0 && !n.closed {
@@ -1194,6 +1483,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                                                         b.signal_closed(id, 2)
                                                     });
                                                 }
+                                                open =
+                                                    Some((n.desktop_entry.clone(), n.app.clone()));
+                                            }
+                                            if let Some((entry, name)) = open {
+                                                open_notification_source(
+                                                    entry.as_deref(),
+                                                    &name,
+                                                    toplevels.as_ref(),
+                                                    &apps,
+                                                );
                                             }
                                             notes.remove_history(idx);
                                         }
@@ -1428,10 +1727,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                             if let Some((item, ak)) = notes.action_at(area, pos, &frame.theme, text)
                             {
+                                let mut open = None;
                                 if let Some(n) = notes.get(item) {
                                     if let Some((key, _)) = n.actions.get(ak) {
                                         let key = key.clone();
                                         let id = n.id;
+                                        if key == "default" {
+                                            open = Some((n.desktop_entry.clone(), n.app.clone()));
+                                        }
                                         with_notifications(&bus_slot, |b| {
                                             b.signal_action(id, &key);
                                             b.signal_closed(id, 2);
@@ -1441,11 +1744,41 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         with_notifications(&bus_slot, |b| b.signal_closed(id, 2));
                                     }
                                 }
+                                if let Some((entry, name)) = open {
+                                    open_notification_source(
+                                        entry.as_deref(),
+                                        &name,
+                                        toplevels.as_ref(),
+                                        &apps,
+                                    );
+                                }
                                 notes.dismiss(item);
                             } else if let Some(i) = notes.hit(area, pos) {
+                                let mut open = None;
                                 if let Some(n) = notes.get(i) {
                                     let id = n.id;
-                                    with_notifications(&bus_slot, |b| b.signal_closed(id, 2));
+                                    if n.desktop_entry.is_some() {
+                                        // Luna ma wpis `.desktop` — otwieramy/aktywujemy
+                                        // aplikację lokalnie (aplikacje Luny nieobsługują
+                                        // `ActionInvoked`, więc sam sygnał by nie zadziałał).
+                                        open = Some((n.desktop_entry.clone(), n.app.clone()));
+                                        with_notifications(&bus_slot, |b| b.signal_closed(id, 2));
+                                    } else if n.actions.iter().any(|(k, _)| k == "default") {
+                                        with_notifications(&bus_slot, |b| {
+                                            b.signal_action(id, "default");
+                                            b.signal_closed(id, 2);
+                                        });
+                                    } else {
+                                        with_notifications(&bus_slot, |b| b.signal_closed(id, 2));
+                                    }
+                                }
+                                if let Some((entry, name)) = open {
+                                    open_notification_source(
+                                        entry.as_deref(),
+                                        &name,
+                                        toplevels.as_ref(),
+                                        &apps,
+                                    );
                                 }
                                 notes.dismiss(i);
                             }
@@ -1484,6 +1817,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Launcher zapomina frazę po zamknięciu — każde otwarcie pokazuje pełną listę.
         let launcher_closed = animating_popup != ActivePopup::Launcher || target_progress <= 0.0;
         if launcher_closed {
+            app_menu = None;
+            app_menu_hover = None;
             launcher.hover = None;
             if !launcher.search.is_empty() {
                 launcher.clear_search();
@@ -1494,7 +1829,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         // kliknięcie poza obrysem (puste tło, inny monitor, dolna część ekranu) trafia
         // do powłoki i zamyka popup, zamiast aktywować okno pod spodem. Ustawiamy to
         // **po** obsłudze zdarzeń, żeby zmiana działała już w tej samej klatce.
-        let popup_open = animating_popup != ActivePopup::None && target_progress > 0.0;
+        let popup_open =
+            (animating_popup != ActivePopup::None && target_progress > 0.0) || security_modal;
+        let clock_widget_rect_now = if popup_open {
+            None
+        } else {
+            clock_activity
+                .as_ref()
+                .and_then(|activity| clock_widget::visible_rect(frame.size, activity, clock_now))
+        };
+        if clock_widget_rect_now.is_none() {
+            clock_widget_hover = false;
+        }
         if std::env::var("LUNA_STATS").is_ok() && animating_popup != logged_popup {
             eprintln!(
                 "luna-shell: popup {:?} → {:?} (cel {:.0})",
@@ -1515,6 +1861,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Bez tego przezroczysty pas do 680 px pożerał kliknięcia okien pod nim
             // (nieklikalne menu Zed, przyciski tytułu Firefoksa itd.).
             let mut rects = vec![Rect::from_xywh(0.0, 0.0, frame.size.width, THICKNESS)];
+            if let Some(widget) = clock_widget_rect_now {
+                rects.push(widget);
+            }
             if notes.visible() {
                 let area = Rect::from_xywh(
                     0.0,
@@ -1681,12 +2030,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 notes.placement() as usize,
                 icon_theme as usize,
                 hover_targets,
+                clock_widget_hover,
             ),
         );
         let menu_sig = (
             task_menu.as_ref().map(|m| m.task + 1).unwrap_or(0),
             task_menu_hover.map(|i| i + 1).unwrap_or(0),
             notify_hover.map(|i| i + 1).unwrap_or(0),
+            app_menu.as_ref().map(|m| m.app + 1).unwrap_or(0),
+            app_menu_hover.map(|i| i + 1).unwrap_or(0),
+            apps_stamp,
+            security_stamp,
+            security_hover.map(|c| c as usize + 1).unwrap_or(0),
         );
         let changed = sig != last_sig || menu_sig != last_menu_sig;
         let animating =
@@ -1804,6 +2159,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     panel::paint_launcher(
                         &apps, &launcher, &hover, icon_theme, &mut ctx, cur_larea,
                     );
+                    if let Some(menu) = &app_menu {
+                        panel::paint_app_menu(&mut ctx, menu.rect, &menu.rows, app_menu_hover);
+                    }
                 }
                 ActivePopup::Wifi => {
                     let slide = (1.0 - anim_progress) * -12.0;
@@ -1855,6 +2213,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         today_day,
                         cal_selected,
                         &calendar_events,
+                        holiday_country.unwrap_or(""),
                         true,
                     );
                     let nrect =
@@ -1981,10 +2340,54 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Rect::from_xywh((size.width - w) / 2.0, THICKNESS + 16.0, w, 72.0),
             );
         }
+        if !popup_open {
+            if let (Some(rect), Some(activity)) = (clock_widget_rect_now, clock_activity.as_ref()) {
+                clock_widget::paint(&mut ctx, rect, activity, clock_now, clock_widget_hover);
+            }
+        }
         notes.paint(
             &mut ctx,
             Rect::from_xywh(0.0, THICKNESS + 8.0, size.width, size.height - THICKNESS),
         );
+
+        // Modal zgody — rysowany jako ostatni, nad launcherem i powiadomieniami.
+        if let Some(prompt) = security_snapshot.prompts.first() {
+            let layout = panel::security_dialog_layout(size, &frame.theme);
+            let capability = libluna_i18n::tr(prompt.capability.label());
+            let message = match prompt.capability {
+                luna::security::Capability::Microphone => {
+                    libluna_i18n::tr_args("{app} is using the microphone", &[("app", &prompt.name)])
+                }
+                luna::security::Capability::Camera => {
+                    libluna_i18n::tr_args("{app} is using the camera", &[("app", &prompt.name)])
+                }
+                luna::security::Capability::Network => libluna_i18n::tr_args(
+                    "{app} wants to send data outside this computer",
+                    &[("app", &prompt.name)],
+                ),
+            };
+            let icon = match prompt.capability {
+                luna::security::Capability::Microphone => IconName::Microphone,
+                luna::security::Capability::Camera => IconName::Camera,
+                luna::security::Capability::Network => IconName::Globe,
+            };
+            panel::paint_security_dialog(
+                &mut ctx,
+                layout,
+                icon,
+                &prompt.name,
+                &capability,
+                &message,
+                prompt.remote.as_deref(),
+                security_hover,
+            );
+        }
+
+        // Schowek aktualizujemy dopiero tutaj: wcześniej `theme`/`ctx` pożyczają
+        // `frame`, a `copy_to_clipboard` potrzebuje wyłącznego dostępu.
+        if let Some(text) = clipboard_pending.take() {
+            frame.copy_to_clipboard(text);
+        }
 
         // Sygnatura była policzona przed rysowaniem (`sig`, `changed`, `animating`,
         // `interactive`) — tutaj tylko podejmujemy decyzję o kolejnej klatce.
@@ -1992,10 +2395,39 @@ fn main() -> Result<(), Box<dyn Error>> {
             frame.request_frame();
         }
         // Zegar i stan systemu odświeżają się także bez ruchu myszy.
-        let keep_alive = if startup.elapsed() < std::time::Duration::from_secs(8) {
+        // Gdy widoczny jest widget licznika, odświeżamy go płynniej.
+        let widget_live = clock_widget_rect_now.is_some_and(|_| {
+            clock_activity.as_ref().is_some_and(|activity| {
+                activity
+                    .timer
+                    .as_ref()
+                    .is_some_and(|timer| timer.running && timer.remaining_at(clock_now) > 0)
+                    || activity
+                        .stopwatch
+                        .as_ref()
+                        .is_some_and(|stopwatch| stopwatch.running)
+            })
+        });
+        let activity_exists = clock_activity
+            .as_ref()
+            .is_some_and(|activity| activity.has_activity(clock_now));
+        let keep_alive = if widget_live {
+            std::time::Duration::from_millis(250)
+        } else if security_modal {
+            // Modal zgody: podświetlenie przycisków i szybka reakcja na decyzję.
+            std::time::Duration::from_millis(250)
+        } else if activity_exists {
+            // Aplikacja może właśnie zamknąć się z aktywnym licznikiem.
+            std::time::Duration::from_millis(500)
+        } else if startup.elapsed() < std::time::Duration::from_secs(8) {
+            std::time::Duration::from_millis(500)
+        } else if animating_popup != ActivePopup::None && target_progress > 0.0 {
+            // Otwarty launcher/menu: szybciej wykrywamy zmiany i odświeżamy podświetlenia.
             std::time::Duration::from_millis(500)
         } else {
-            std::time::Duration::from_secs(5)
+            // Instalacja pakietu ma pojawić się w launcherze bez restartu powłoki —
+            // 2 s to kompromis między czasem reakcji a bezczynnym wybudzaniem.
+            std::time::Duration::from_secs(2)
         };
         frame.request_frame_after(keep_alive);
         last_sig = sig;
@@ -2037,6 +2469,157 @@ struct TrayContextState {
     item: luna::tray::TrayItem,
     rows: Vec<luna::tray::TrayMenuRow>,
     rect: Rect,
+}
+
+/// Otwarte menu kontekstowe aplikacji w launcherze.
+struct AppMenuState {
+    /// Indeks w `apps` z chwili otwarcia menu.
+    app: usize,
+    rect: Rect,
+    rows: Vec<panel::AppMenuRow>,
+}
+
+/// Efekt wybranej akcji menu aplikacji.
+enum AppMenuEffect {
+    None,
+    /// Po uruchomieniu/odinstalowaniu zamknij launcher.
+    CloseLauncher,
+    /// Skopiuj polecenie do schowka (launcher zostaje otwarty).
+    CopyCommand(String),
+}
+
+/// Pozycje menu kontekstowego aplikacji (PPM w launcherze).
+fn app_menu_rows(app: &App, pinned: bool) -> Vec<panel::AppMenuRow> {
+    use panel::{AppMenuAction, AppMenuRow};
+    let has_exec = app.exec.is_some();
+    let installed = app.desktop_path.is_some();
+    let favorite = if pinned {
+        libluna_i18n::tr("Remove from favorites")
+    } else {
+        libluna_i18n::tr("Add to favorites")
+    };
+    vec![
+        AppMenuRow {
+            label: libluna_i18n::tr("Open"),
+            action: Some(AppMenuAction::Launch),
+            enabled: has_exec,
+            danger: false,
+        },
+        AppMenuRow {
+            label: favorite,
+            action: Some(AppMenuAction::ToggleFavorite),
+            enabled: true,
+            danger: false,
+        },
+        AppMenuRow::separator(),
+        AppMenuRow {
+            label: libluna_i18n::tr("Open as administrator"),
+            action: Some(AppMenuAction::OpenAsAdmin),
+            enabled: has_exec,
+            danger: false,
+        },
+        AppMenuRow {
+            label: libluna_i18n::tr("Copy launch command"),
+            action: Some(AppMenuAction::CopyCommand),
+            enabled: has_exec,
+            danger: false,
+        },
+        AppMenuRow::separator(),
+        AppMenuRow {
+            label: libluna_i18n::tr("Uninstall"),
+            action: Some(AppMenuAction::Uninstall),
+            enabled: installed,
+            danger: true,
+        },
+    ]
+}
+
+/// Przesuwa podświetlenie menu o `delta`, pomijając separatory i wyłączone wpisy.
+fn app_menu_step(
+    rows: &[panel::AppMenuRow],
+    current: Option<usize>,
+    delta: isize,
+) -> Option<usize> {
+    let selectable: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.enabled && row.action.is_some())
+        .map(|(i, _)| i)
+        .collect();
+    if selectable.is_empty() {
+        return None;
+    }
+    let Some(pos) = current.and_then(|i| selectable.iter().position(|&r| r == i)) else {
+        return if delta < 0 {
+            selectable.last().copied()
+        } else {
+            selectable.first().copied()
+        };
+    };
+    let last = selectable.len() as isize - 1;
+    let next = (pos as isize + delta).clamp(0, last) as usize;
+    Some(selectable[next])
+}
+
+/// Wykonuje akcję z menu kontekstowego aplikacji.
+fn perform_app_menu(
+    action: panel::AppMenuAction,
+    app: &App,
+    launcher: &mut Launcher,
+) -> AppMenuEffect {
+    use panel::AppMenuAction as A;
+    match action {
+        A::Launch => {
+            launch_from_launcher(launcher, app);
+            AppMenuEffect::CloseLauncher
+        }
+        A::ToggleFavorite => {
+            launcher.toggle_pin(app);
+            luna::launcher_conf::save_from(launcher);
+            AppMenuEffect::None
+        }
+        A::OpenAsAdmin => {
+            launch_app_as_admin(app);
+            AppMenuEffect::CloseLauncher
+        }
+        A::CopyCommand => app
+            .exec
+            .clone()
+            .map(AppMenuEffect::CopyCommand)
+            .unwrap_or(AppMenuEffect::None),
+        A::Uninstall => {
+            open_store_package(app);
+            AppMenuEffect::CloseLauncher
+        }
+    }
+}
+
+/// Przebudowuje listę aplikacji po instalacji pakietu lub zmianie języka.
+///
+/// Zwraca `true`, gdy lista została zastąpiona. Przy `reset` czyścimy pozycję
+/// i przewinięcie (zmiana języka); przy odświeżeniu po instalacji zachowujemy
+/// miejsce, w którym użytkownik był, i tylko ograniczamy zaznaczenie do listy.
+fn reload_apps(apps: &mut Vec<App>, launcher: &mut Launcher, reset: bool) -> bool {
+    let desktop = luna::apps::scan();
+    if desktop.is_empty() {
+        return false;
+    }
+    luna::apps::refresh_icon_names();
+    *apps = App::from_desktop(&desktop);
+    launcher.hover = None;
+    if reset {
+        launcher.selected = None;
+        launcher.scroll = 0.0;
+        launcher.carousel = 0;
+    } else {
+        let len = launcher.filter_apps(apps).len();
+        launcher.selected = if len == 0 {
+            None
+        } else {
+            launcher.selected.map(|i| i.min(len - 1))
+        };
+    }
+    true
 }
 
 /// Zamienia tytuł okna na jednoliniowy (protokół sterowania jest linijkowy).
@@ -2086,14 +2669,80 @@ fn tray_menu_for(
 fn notification_from(inc: Incoming) -> Notification {
     // `app_icon`/`desktop-entry` z D-Busa bywa dokładniejszy niż sama nazwa aplikacji
     // (np. „Zed” wysyła `dev.zed.Zed`), więc przekazujemy go do doboru ikony.
-    let icon = icon_for(inc.icon.as_deref().unwrap_or(&inc.app_name));
+    let icon = icon_for(
+        inc.icon
+            .as_deref()
+            .or(inc.desktop_entry.as_deref())
+            .unwrap_or(&inc.app_name),
+    );
     let timeout = inc.timeout_secs();
     let mut n = Notification::new(inc.app_name, inc.summary, inc.body)
         .with_icon(icon)
         .with_id(inc.id)
-        .with_actions(inc.actions);
+        .with_actions(inc.actions)
+        .with_desktop_entry(inc.desktop_entry);
     n.timeout = timeout;
     n
+}
+
+/// Otwiera aplikację, która wysłała powiadomienie.
+///
+/// Najpierw szuka istniejącego okna po `app_id` (aktywuje je — bez drugiej
+/// instancji), a dopiero potem uruchamia wpis `.desktop`. Gdy wpisu nie ma,
+/// próbuje dopasować nazwę wyświetlaną z launcher`a.
+fn open_notification_source(
+    entry: Option<&str>,
+    fallback_name: &str,
+    toplevels: Option<&luna::toplevels::Toplevels>,
+    apps: &[App],
+) {
+    let stem = entry
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.strip_suffix(".desktop").unwrap_or(value));
+    if let Some(stem) = stem {
+        if let Some(tl) = toplevels {
+            if let Some(index) = tl
+                .tasks()
+                .iter()
+                .position(|task| app_id_matches_entry(&task.app_id, stem))
+            {
+                tl.show(index);
+                return;
+            }
+        }
+        if let Some(app) = apps
+            .iter()
+            .find(|app| app_entry_stem(app).is_some_and(|name| name.eq_ignore_ascii_case(stem)))
+        {
+            launch_app(app);
+            return;
+        }
+    }
+    if let Some(app) = apps
+        .iter()
+        .find(|app| app.name.eq_ignore_ascii_case(fallback_name.trim()))
+    {
+        launch_app(app);
+    }
+}
+
+/// Nazwa pliku `.desktop` bez rozszerzenia (np. `eu.luna.Store`).
+fn app_entry_stem(app: &App) -> Option<&str> {
+    app.desktop_path
+        .as_deref()
+        .and_then(std::path::Path::file_stem)
+        .and_then(std::ffi::OsStr::to_str)
+}
+
+/// Czy `app_id` okna odnosi się do wpisu `.desktop` o nazwie `stem`.
+fn app_id_matches_entry(app_id: &str, stem: &str) -> bool {
+    let app_id = app_id.trim().to_lowercase();
+    let stem = stem.trim().to_lowercase();
+    if app_id.is_empty() || stem.is_empty() {
+        return false;
+    }
+    app_id == stem || app_id.ends_with(&format!(".{stem}")) || stem.ends_with(&format!(".{app_id}"))
 }
 
 /// Dobiera ikonę pakietu do nazwy aplikacji wysyłającej powiadomienie.
@@ -2251,6 +2900,91 @@ fn launch_app(app: &App) {
     }
     // 2) Bez `gio`: bezpośrednie `Exec`.
     launch_direct(&exec, app.terminal, force_x11);
+}
+
+/// Uruchamia aplikację z uprawnieniami administratora.
+///
+/// `pkexec` uruchamia agenta polkit Luny (`luna-polkit`), który pokaże okno
+/// z prośbą o hasło administratora. Aplikacje GUI uruchamiamy przez X11
+/// (Xwayland) — root zwykle nie ma dostępu do gniazda Waylanda użytkownika.
+fn launch_app_as_admin(app: &App) {
+    let Some(exec) = app.exec.clone() else {
+        return;
+    };
+    let mut cmd = Command::new("pkexec");
+    cmd.arg("env");
+    if let Ok(display) = std::env::var("DISPLAY") {
+        cmd.arg(format!("DISPLAY={display}"));
+    }
+    if let Ok(auth) = std::env::var("XAUTHORITY") {
+        cmd.arg(format!("XAUTHORITY={auth}"));
+    }
+    // `sh -c` obsługuje argumenty i cudzysłowy z pola `Exec`.
+    cmd.arg("sh").arg("-c").arg(format!("exec {exec}"));
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null());
+    match apps_log() {
+        Some(log) => {
+            cmd.stderr(std::process::Stdio::from(log));
+        }
+        None => {
+            cmd.stderr(std::process::Stdio::null());
+        }
+    }
+    match cmd.spawn() {
+        Ok(_) => log_apps(&format!("admin (pkexec): {exec}")),
+        Err(err) => log_apps(&format!("pkexec nie uruchomił {exec}: {err}")),
+    }
+}
+
+/// Otwiera Sklep na pakiecie odpowiadającym aplikacji (ścieżka „Odinstaluj”).
+///
+/// Przekazujemy nazwę pliku `.desktop` (np. `org.gnome.Nautilus`); Sklep sam
+/// dopasowuje ją do identyfikatora pakietu i otwiera jego szczegóły, gdzie jest
+/// przycisk usuwania. Gdy `Exec` jest bardziej jednoznaczne, używamy też jego.
+fn open_store_package(app: &App) {
+    let desktop_id = app
+        .desktop_path
+        .as_ref()
+        .and_then(|path| path.file_stem())
+        .map(|stem| stem.to_string_lossy().into_owned());
+    let exec_id = app
+        .exec
+        .as_deref()
+        .and_then(|exec| exec.split_whitespace().next())
+        .map(|bin| {
+            std::path::Path::new(bin)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| bin.to_owned())
+        });
+    let Some(query) = desktop_id.or(exec_id) else {
+        return;
+    };
+    // Najpierw PATH (instalacja systemowa), potem katalog obok `luna-shell`
+    // (uruchomienie z drzewa źródeł lub z paczki portable).
+    let store_bin = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("luna-store")))
+        .filter(|path| path.is_file())
+        .map(|path| path.into_os_string())
+        .unwrap_or_else(|| "luna-store".into());
+    let mut cmd = Command::new(store_bin);
+    cmd.arg("--package").arg(&query);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null());
+    match apps_log() {
+        Some(log) => {
+            cmd.stderr(std::process::Stdio::from(log));
+        }
+        None => {
+            cmd.stderr(std::process::Stdio::null());
+        }
+    }
+    match cmd.spawn() {
+        Ok(_) => log_apps(&format!("sklep: --package {query}")),
+        Err(err) => log_apps(&format!("nie udało się otworzyć Sklepu dla {query}: {err}")),
+    }
 }
 
 /// Czy aplikacja wymaga XWaylanda (X11).
@@ -2509,6 +3243,30 @@ fn log_apps(msg: &str) {
 }
 
 /// Bieżąca godzina i data w czasie lokalnym — `("HH:MM", "DD.MM", rok, miesiąc, dzień)`.
+/// Otwiera zegar na stronie pasującej do aktywnego licznika.
+fn open_clock_activity(activity: &ClockActivity, now: i64) {
+    let tab = if activity
+        .timer
+        .as_ref()
+        .is_some_and(|timer| timer.is_active(now))
+    {
+        "timer"
+    } else if activity
+        .stopwatch
+        .as_ref()
+        .is_some_and(|stopwatch| stopwatch.is_active(now))
+    {
+        "stopwatch"
+    } else {
+        "clock"
+    };
+    let mut command = Command::new("luna-clock");
+    command.arg("--tab").arg(tab);
+    if let Err(err) = command.spawn() {
+        eprintln!("luna-shell: nie udało się uruchomić luna-clock: {err}");
+    }
+}
+
 /// Otwiera pełny kalendarz na wybranym dniu (albo na bieżącym miesiącu).
 fn open_calendar_app(year: i64, month: u32, day: Option<u32>) {
     let mut command = Command::new("luna-clock");
@@ -2633,5 +3391,14 @@ mod tests {
     #[test]
     fn native_wayland_apps_stay_on_wayland() {
         assert!(!needs_x11(&app("Luna — widgety", "luna-showcase")));
+    }
+
+    #[test]
+    fn notification_app_ids_match_desktop_entries() {
+        assert!(app_id_matches_entry("eu.luna.Store", "eu.luna.Store"));
+        assert!(app_id_matches_entry("eu.luna.Store", "Store"));
+        assert!(app_id_matches_entry("Store", "eu.luna.Store"));
+        assert!(!app_id_matches_entry("org.gnome.Nautilus", "eu.luna.Store"));
+        assert!(!app_id_matches_entry("", "eu.luna.Store"));
     }
 }

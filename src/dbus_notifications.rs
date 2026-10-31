@@ -37,8 +37,12 @@ pub struct Incoming {
     pub actions: Vec<(String, String)>,
     /// `hint urgency = 2` (critical) — takich powiadomień nie wygaszamy automatycznie.
     pub critical: bool,
-    /// Ikona aplikacji (`app_icon` albo hint `image-path`/`desktop-entry`).
+    /// Ikona aplikacji (`app_icon` albo hint `image-path`).
     pub icon: Option<String>,
+    /// Hint `desktop-entry` — plik `.desktop` nadawcy (np. `eu.luna.Store.desktop`).
+    /// Powłoka używa go po kliknięciu toasta: aktywuje istniejące okno aplikacji
+    /// albo uruchamia ją, jeśli nie działa.
+    pub desktop_entry: Option<String>,
 }
 
 impl Incoming {
@@ -190,8 +194,8 @@ impl Server {
         let critical = hints.get("urgency").and_then(|v| u8::try_from(v).ok()) == Some(2);
         let icon = (!app_icon.trim().is_empty())
             .then(|| app_icon.trim().to_owned())
-            .or_else(|| hint_string(&hints, "image-path"))
-            .or_else(|| hint_string(&hints, "desktop-entry"));
+            .or_else(|| hint_string(&hints, "image-path"));
+        let desktop_entry = hint_string(&hints, "desktop-entry");
         let id = {
             let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
             let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
@@ -205,6 +209,7 @@ impl Server {
                 actions: acts,
                 critical,
                 icon,
+                desktop_entry,
             });
             id
         };

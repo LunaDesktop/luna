@@ -8,8 +8,10 @@
 
 pub mod accounts_service;
 pub mod apps;
+pub mod security;
 pub mod bluetooth;
 pub mod calendar;
+pub mod clock_widget;
 pub mod colors;
 pub mod dbus_notifications;
 pub mod default_apps;

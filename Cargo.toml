@@ -1,6 +1,6 @@
 [package]
 name = "luna"
-version = "0.0.8"
+version = "0.0.9"
 edition = "2021"
 license = "GPL-3.0-or-later"
 rust-version = "1.80"
@@ -47,15 +47,20 @@ path = "src/bin/luna-eq.rs"
 name = "luna-accounts"
 path = "src/bin/luna-accounts.rs"
 
+[[bin]]
+name = "luna-security"
+path = "src/bin/luna-security.rs"
+
 [dependencies]
-libluna-core = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.5" }
-libluna-widgets = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.5" }
-libluna-render = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.5" }
-libluna-i18n = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.5" }
-libluna-platform = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.5" }
+libluna-core = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.6" }
+libluna-widgets = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.6" }
+libluna-render = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.6" }
+libluna-i18n = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.6" }
+libluna-platform = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.6" }
 
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }

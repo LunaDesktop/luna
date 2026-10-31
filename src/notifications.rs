@@ -120,6 +120,8 @@ pub struct Notification {
     pub id: u32,
     /// Klucze i etykiety akcji (`ActionInvoked`); puste, gdy brak akcji.
     pub actions: Vec<(String, String)>,
+    /// Wpis `.desktop` nadawcy — kliknięcie otwiera (lub aktywuje) tę aplikację.
+    pub desktop_entry: Option<String>,
     /// Czy serwer wysłał już `NotificationClosed` dla tego wpisu historii.
     ///
     /// Pozwala uniknąć podwójnego sygnału, gdy powiadomienie wygasło, a potem
@@ -137,6 +139,7 @@ impl Notification {
             timeout: 5.0,
             id: 0,
             actions: Vec::new(),
+            desktop_entry: None,
             closed: false,
         }
     }
@@ -155,6 +158,12 @@ impl Notification {
     /// Ustawia akcje jako pary `(klucz, etykieta)` (do wysłania `ActionInvoked`).
     pub fn with_actions(mut self, actions: Vec<(String, String)>) -> Self {
         self.actions = actions;
+        self
+    }
+
+    /// Ustawia wpis `.desktop` nadawcy (klik w toast otwiera tę aplikację).
+    pub fn with_desktop_entry(mut self, entry: Option<String>) -> Self {
+        self.desktop_entry = entry.filter(|value| !value.trim().is_empty());
         self
     }
 }

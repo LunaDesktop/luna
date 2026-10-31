@@ -6,6 +6,9 @@
 
 use std::path::PathBuf;
 
+use libluna_core::config::{config_file, parse_pairs};
+use libluna_core::holidays;
+
 /// Wydarzenie widoczne w panelu (bez notatki — panel pokazuje tylko plan dnia).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarEvent {
@@ -25,6 +28,36 @@ pub fn events_path() -> Option<PathBuf> {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
         })?;
     Some(base.join("luna").join("clock").join("events.tsv"))
+}
+
+/// Kraj świąt wybrany w `luna-clock` (albo wykryty z systemu).
+///
+/// Respektuje przełącznik „Pokazuj święta” z `clock.conf`. Gdy aplikacja
+/// nigdy nie była uruchamiana, kraj jest wykrywany z locale/strefy.
+pub fn preferred_country() -> Option<&'static str> {
+    let text = config_file("clock.conf").and_then(|path| std::fs::read_to_string(path).ok());
+    match text {
+        Some(text) => country_from_config(&text),
+        None => holidays::detect_country(),
+    }
+}
+
+/// Wydzielone z [`preferred_country`] dla testów bez systemu plików.
+pub fn country_from_config(text: &str) -> Option<&'static str> {
+    let mut show = true;
+    let mut selected = None;
+    for (key, value) in parse_pairs(text) {
+        match key.as_str() {
+            "show_holidays" => show = matches!(value.trim(), "1" | "true" | "yes" | "on"),
+            "country" => selected = holidays::normalize_country(&value),
+            _ => {}
+        }
+    }
+    if show {
+        selected.or_else(holidays::detect_country)
+    } else {
+        None
+    }
 }
 
 /// Znacznik czasu pliku — pozwala odświeżyć listę tylko po zmianie.
@@ -151,5 +184,17 @@ mod tests {
         assert!(valid_date("2026-10-31"));
         assert!(!valid_date("2026-13-01"));
         assert!(!valid_date("31.10.2026"));
+    }
+
+    #[test]
+    fn reads_country_and_holiday_switch_from_clock_config() {
+        assert_eq!(country_from_config("country=PL\n"), Some("PL"));
+        assert_eq!(country_from_config("country=de\n"), Some("DE"));
+        assert_eq!(country_from_config("country=PL\nshow_holidays=0\n"), None);
+        // Nieznany kod degraduje się do wykrywania z systemu.
+        assert_eq!(
+            country_from_config("country=XX\n"),
+            holidays::detect_country()
+        );
     }
 }
