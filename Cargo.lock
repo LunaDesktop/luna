@@ -545,6 +545,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
 name = "js-sys"
 version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -574,18 +580,18 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libluna-core"
-version = "0.0.5"
-source = "git+https://github.com/LunaDesktop/libLuna.git#ad258313da82a37d42910509f85ffa8d43080aad"
+version = "0.0.7"
+source = "git+https://github.com/LunaDesktop/libLuna.git#6785bd49096c72cae462c63ebc729638b11eaabb"
 
 [[package]]
 name = "libluna-i18n"
-version = "0.0.5"
-source = "git+https://github.com/LunaDesktop/libLuna.git#ad258313da82a37d42910509f85ffa8d43080aad"
+version = "0.0.7"
+source = "git+https://github.com/LunaDesktop/libLuna.git#6785bd49096c72cae462c63ebc729638b11eaabb"
 
 [[package]]
 name = "libluna-platform"
-version = "0.0.5"
-source = "git+https://github.com/LunaDesktop/libLuna.git#ad258313da82a37d42910509f85ffa8d43080aad"
+version = "0.0.7"
+source = "git+https://github.com/LunaDesktop/libLuna.git#6785bd49096c72cae462c63ebc729638b11eaabb"
 dependencies = [
  "calloop",
  "libc",
@@ -598,8 +604,8 @@ dependencies = [
 
 [[package]]
 name = "libluna-render"
-version = "0.0.5"
-source = "git+https://github.com/LunaDesktop/libLuna.git#ad258313da82a37d42910509f85ffa8d43080aad"
+version = "0.0.7"
+source = "git+https://github.com/LunaDesktop/libLuna.git#6785bd49096c72cae462c63ebc729638b11eaabb"
 dependencies = [
  "fontdue",
  "libluna-core",
@@ -609,8 +615,8 @@ dependencies = [
 
 [[package]]
 name = "libluna-widgets"
-version = "0.0.5"
-source = "git+https://github.com/LunaDesktop/libLuna.git#ad258313da82a37d42910509f85ffa8d43080aad"
+version = "0.0.7"
+source = "git+https://github.com/LunaDesktop/libLuna.git#6785bd49096c72cae462c63ebc729638b11eaabb"
 dependencies = [
  "libluna-core",
  "libluna-render",
@@ -642,7 +648,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "luna"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "libc",
  "libluna-core",
@@ -651,6 +657,7 @@ dependencies = [
  "libluna-render",
  "libluna-widgets",
  "serde",
+ "serde_json",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
@@ -928,6 +935,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.154"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -1578,6 +1598,12 @@ name = "zlib-rs"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zvariant"
