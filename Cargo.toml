@@ -1,0 +1,76 @@
+[package]
+name = "luna"
+version = "0.0.8"
+edition = "2021"
+license = "GPL-3.0-or-later"
+rust-version = "1.80"
+authors = ["Patryk Szkudlarek / libLuna contributors"]
+description = "Luna — powłoka środowiska graficznego (panel, launcher) na libLunie, działająca na kompozytorze Selene."
+# repository = "https://github.com/mijsys/luna"
+
+[workspace]
+resolver = "2"
+
+[lib]
+name = "luna"
+path = "src/lib.rs"
+
+[[bin]]
+name = "luna-panel"
+path = "src/bin/luna-panel.rs"
+
+[[bin]]
+name = "luna-shell"
+path = "src/bin/luna-shell.rs"
+
+[[bin]]
+name = "luna-apps"
+path = "src/bin/luna-apps.rs"
+
+[[bin]]
+name = "luna-polkit"
+path = "src/bin/luna-polkit.rs"
+
+[[bin]]
+name = "luna-lock"
+path = "src/bin/luna-lock.rs"
+
+[[bin]]
+name = "luna-keyring"
+path = "src/bin/luna-keyring.rs"
+
+[[bin]]
+name = "luna-eq"
+path = "src/bin/luna-eq.rs"
+
+[[bin]]
+name = "luna-accounts"
+path = "src/bin/luna-accounts.rs"
+
+[dependencies]
+libluna-core = { path = "../libluna/crates/libluna-core", version = "0.0.5" }
+libluna-widgets = { path = "../libluna/crates/libluna-widgets", version = "0.0.5" }
+libluna-render = { path = "../libluna/crates/libluna-render", version = "0.0.5" }
+libluna-i18n = { path = "../libluna/crates/libluna-i18n", version = "0.0.5" }
+libluna-platform = { path = "../libluna/crates/libluna-platform", version = "0.0.5" }
+
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+zbus = { version = "5.12.0", features = ["blocking-api"] }
+
+# Profil `dev` (cargo run/test domyślnie): bez optymalizacji kod rysujący potrafi chodzić
+# setki razy wolniej (panel spada do 1–5 FPS), co łatwo pomylić z błędem wydajności.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
