@@ -3944,17 +3944,13 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
         panel_icon(ctx, IconName::ChevronRight, r, t.colors.text);
     }
 
-    // Przycisk Quick Panelu (motyw, Wi-Fi, dźwięk, jasność).
+    // Przycisk Quick Panelu (motyw, Wi-Fi, dźwięk, jasność) — flat: bez wysepki,
+    // tło pojawia się tylko pod kursorem.
     let qb = quick_button_rect(rect, t, ctx.text, panel);
-    ctx.scene.fill_rounded_rect(
-        qb,
-        t.radius.small,
-        if hover.is_hovered(qb) {
-            libluna_widgets::hover_fill(t)
-        } else {
-            t.colors.shade
-        },
-    );
+    if hover.is_hovered(qb) {
+        ctx.scene
+            .fill_rounded_rect(qb, t.radius.small, libluna_widgets::hover_fill(t));
+    }
     panel_icon(
         ctx,
         IconName::Sliders,
