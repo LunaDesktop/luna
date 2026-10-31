@@ -151,6 +151,56 @@ pub fn security_dialog_hit(layout: SecurityDialogLayout, p: Point) -> Option<Sec
     }
 }
 
+/// Rozmieszczenie okna szczegółów „Luna Security” (lista aktywnych uprawnień).
+pub struct SecurityDetailsLayout {
+    pub card: Rect,
+    pub rows: Vec<Rect>,
+    pub close: Rect,
+}
+
+impl SecurityDetailsLayout {
+    /// Czy punkt zamyka okno (przycisk albo kliknięcie poza kartą).
+    pub fn closes_at(&self, p: Point) -> bool {
+        self.close.contains(p) || !self.card.contains(p)
+    }
+}
+
+/// Okno szczegółów jest wyśrodkowane pod paskiem, jak modal zgody.
+pub fn security_details_layout(size: Size, theme: &Theme, rows: usize) -> SecurityDetailsLayout {
+    let w = 560.0_f64.min((size.width - 64.0).max(360.0));
+    let pad = theme.spacing.lg;
+    let header_h = 58.0;
+    let row_h = 46.0;
+    let footer_h = 58.0;
+    let shown = rows.max(1) as f64;
+    let h = header_h + shown * row_h + footer_h;
+    let card = Rect::from_xywh(((size.width - w) / 2.0).max(16.0), THICKNESS + 40.0, w, h);
+    let mut row_rects = Vec::with_capacity(rows.max(1));
+    let mut y = card.y() + header_h;
+    for _ in 0..rows.max(1) {
+        row_rects.push(Rect::from_xywh(card.x() + pad, y, w - 2.0 * pad, row_h));
+        y += row_h;
+    }
+    let bw = 132.0;
+    let bh = 34.0;
+    let close = Rect::from_xywh(card.right() - pad - bw, card.bottom() - pad - bh, bw, bh);
+    SecurityDetailsLayout {
+        card,
+        rows: row_rects,
+        close,
+    }
+}
+
+/// Wiersz listy szczegółów (teksty już przetłumaczone).
+pub struct SecurityDetailRow<'a> {
+    pub icon: IconName,
+    pub app: &'a str,
+    pub capability: &'a str,
+    pub remote: Option<&'a str>,
+    pub status: &'a str,
+    pub color: Color,
+}
+
 impl PanelState {
     /// Przykładowy stan (podglądy, testy).
     pub fn sample() -> Self {
@@ -3896,7 +3946,9 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
     }
 
     if panel.security.any() {
-        paint_security_indicators(ctx, rect, clock_r, panel);
+        let chip_hover = security_chip_rect(rect, clock_r, t, ctx.text, panel)
+            .is_some_and(|r| hover.position().is_some_and(|p| r.contains(p)));
+        paint_security_indicators(ctx, rect, clock_r, panel, chip_hover);
     }
 
     // ── Prawa grupa (od prawej): przełączniki statusu i przestrzenie ──
@@ -3963,7 +4015,45 @@ pub fn paint_panel(panel: &PanelState, hover: &Hover, ctx: &mut PaintCtx, rect: 
 ///
 /// Rysujemy je między zegarem a prawą grupą przełączników. Jeśli miejsca jest
 /// za mało (wąski ekran), pomijamy je — ważniejszy jest taskbar i przełączniki.
-fn paint_security_indicators(ctx: &mut PaintCtx, bar: Rect, clock_r: Rect, panel: &PanelState) {
+/// Bok ikony w chipie wskaźników.
+const SECURITY_ICON: f64 = 15.0;
+/// Ile ikon mieści chip (mikrofon, kamera, sieć).
+fn security_icon_count(indicators: &SecurityIndicators) -> usize {
+    usize::from(indicators.microphone)
+        + usize::from(indicators.camera)
+        + usize::from(indicators.network)
+}
+
+/// Prostokąt chipa wskaźników bezpieczeństwa (`None` = brak wskaźników lub brak miejsca).
+pub fn security_chip_rect(
+    bar: Rect,
+    clock_r: Rect,
+    theme: &Theme,
+    text: &TextEngine,
+    state: &PanelState,
+) -> Option<Rect> {
+    let count = security_icon_count(&state.security);
+    if count == 0 {
+        return None;
+    }
+    let gap = 6.0;
+    let pad = 6.0;
+    let width = 2.0 * pad + count as f64 * SECURITY_ICON + (count.saturating_sub(1) as f64) * gap;
+    let right_limit = toggle_rects(bar, theme, text, state)
+        .first()
+        .map(|r| r.x())
+        .unwrap_or(bar.right() - 120.0);
+    let x = clock_r.right() + theme.spacing.lg;
+    (x + width <= right_limit - 8.0).then(|| Rect::from_xywh(x, bar.center().y - 13.0, width, 26.0))
+}
+
+fn paint_security_indicators(
+    ctx: &mut PaintCtx,
+    bar: Rect,
+    clock_r: Rect,
+    panel: &PanelState,
+    hovered: bool,
+) {
     let t = *ctx.theme;
     let mut icons: Vec<(IconName, Color)> = Vec::new();
     if panel.security.microphone {
@@ -3978,36 +4068,34 @@ fn paint_security_indicators(ctx: &mut PaintCtx, bar: Rect, clock_r: Rect, panel
     if icons.is_empty() {
         return;
     }
-    let isz = 15.0;
-    let gap = 6.0;
-    let pad = 6.0;
-    let width = 2.0 * pad + icons.len() as f64 * isz + (icons.len().saturating_sub(1) as f64) * gap;
-    let right_limit = toggle_rects(bar, &t, ctx.text, panel)
-        .first()
-        .map(|r| r.x())
-        .unwrap_or(bar.right() - 120.0);
-    let x = clock_r.right() + t.spacing.lg;
-    if x + width > right_limit - 8.0 {
+    let Some(chip) = security_chip_rect(bar, clock_r, &t, ctx.text, panel) else {
         return;
-    }
-    let chip = Rect::from_xywh(x, bar.center().y - 13.0, width, 26.0);
-    ctx.scene
-        .fill_rounded_rect(chip, t.radius.small, t.colors.shade);
+    };
+    ctx.scene.fill_rounded_rect(
+        chip,
+        t.radius.small,
+        if hovered {
+            libluna_widgets::hover_fill(&t)
+        } else {
+            t.colors.shade
+        },
+    );
     ctx.scene
         .stroke_rounded_rect(chip, t.radius.small, 1.0, t.colors.border);
-    let mut ix = chip.x() + pad;
+    let mut ix = chip.x() + 6.0;
     for (icon, color) in icons {
         paint_icon(
             ctx,
             icon,
-            Rect::from_xywh(ix, chip.center().y - isz / 2.0, isz, isz),
+            Rect::from_xywh(
+                ix,
+                chip.center().y - SECURITY_ICON / 2.0,
+                SECURITY_ICON,
+                SECURITY_ICON,
+            ),
             color,
         );
-        ix += isz + gap;
-    }
-    if panel.security.alert {
-        let dot = Rect::from_xywh(chip.right() - 7.0, chip.y() + 4.0, 5.0, 5.0);
-        ctx.scene.fill_rounded_rect(dot, 2.5, t.colors.error);
+        ix += SECURITY_ICON + 6.0;
     }
 }
 
@@ -4152,6 +4240,114 @@ pub fn paint_security_dialog(
         true,
         hover == Some(SecurityChoice::Allow),
     );
+}
+
+/// Rysuje okno szczegółów: lista aplikacji korzystających z mikrofonu, kamery
+/// albo wysyłających dane na zewnątrz.
+pub fn paint_security_details(
+    ctx: &mut PaintCtx,
+    layout: &SecurityDetailsLayout,
+    rows: &[SecurityDetailRow<'_>],
+    empty: &str,
+    close_label: &str,
+    hover_close: bool,
+) {
+    let t = *ctx.theme;
+    let card = layout.card;
+    ctx.scene
+        .fill_rounded_rect(card, t.radius.large, t.colors.card_bg);
+    ctx.scene
+        .stroke_rounded_rect(card, t.radius.large, 1.0, t.colors.border);
+
+    let pad = t.spacing.lg;
+    ctx.label_left(
+        card.x() + pad,
+        card.y() + pad + 4.0,
+        &tr("Luna Security"),
+        t.typography.heading.size,
+        weight::BOLD,
+        t.colors.text,
+    );
+
+    if rows.is_empty() {
+        if let Some(row) = layout.rows.first() {
+            ctx.label_center(
+                card.center().x,
+                row.center().y,
+                empty,
+                t.typography.body.size,
+                weight::NORMAL,
+                t.colors.dim_text,
+            );
+        }
+    } else {
+        for (rect, row) in layout.rows.iter().zip(rows.iter()) {
+            let icon_sz = 26.0;
+            let icon_rect =
+                Rect::from_xywh(rect.x(), rect.center().y - icon_sz / 2.0, icon_sz, icon_sz);
+            ctx.scene
+                .fill_rounded_rect(icon_rect, icon_sz / 2.0, row.color.scale_alpha(0.14));
+            paint_icon(
+                ctx,
+                row.icon,
+                Rect::from_xywh(
+                    icon_rect.center().x - 8.0,
+                    icon_rect.center().y - 8.0,
+                    16.0,
+                    16.0,
+                ),
+                row.color,
+            );
+
+            let text_x = icon_rect.right() + t.spacing.md;
+            let status_w = 120.0;
+            let avail = (rect.right() - status_w - text_x).max(40.0);
+            let app = ellipsize(
+                row.app,
+                avail,
+                t.typography.body.size,
+                weight::BOLD,
+                ctx.text,
+            );
+            ctx.label_left(
+                text_x,
+                rect.center().y - 9.0,
+                &app,
+                t.typography.body.size,
+                weight::BOLD,
+                t.colors.text,
+            );
+            let detail = match row.remote {
+                Some(remote) => format!("{}: {remote}", row.capability),
+                None => row.capability.to_owned(),
+            };
+            let detail = ellipsize(
+                &detail,
+                avail,
+                t.typography.caption.size,
+                weight::NORMAL,
+                ctx.text,
+            );
+            ctx.label_left(
+                text_x,
+                rect.center().y + 6.0,
+                &detail,
+                t.typography.caption.size,
+                weight::NORMAL,
+                t.colors.dim_text,
+            );
+            ctx.label_right(
+                rect.right(),
+                rect.center().y,
+                row.status,
+                t.typography.caption.size,
+                weight::MEDIUM,
+                row.color,
+            );
+        }
+    }
+
+    paint_security_button(ctx, layout.close, close_label, true, hover_close);
 }
 
 fn paint_security_button(
@@ -5215,6 +5411,79 @@ mod security_ui_tests {
         let mut scene = Scene::new();
         let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
         paint_panel(&panel, &Hover::new(), &mut ctx, bar);
+        assert!(!scene.is_empty());
+    }
+
+    #[test]
+    fn security_chip_appears_only_with_indicators() {
+        use libluna_render::TextEngine;
+        let theme = Theme::light();
+        let text = TextEngine::none();
+        let bar = Rect::from_xywh(0.0, 0.0, 1280.0, THICKNESS);
+        let mut panel = PanelState::sample();
+        panel.security = SecurityIndicators::default();
+        let clock = clock_rect(bar, &theme, &text, &panel);
+        assert!(security_chip_rect(bar, clock, &theme, &text, &panel).is_none());
+
+        panel.security = SecurityIndicators {
+            microphone: true,
+            camera: false,
+            network: true,
+            alert: false,
+        };
+        let clock = clock_rect(bar, &theme, &text, &panel);
+        let chip = security_chip_rect(bar, clock, &theme, &text, &panel).expect("chip widoczny");
+        assert!(bar.contains(chip.center()));
+        assert_eq!(chip.height(), 26.0);
+    }
+
+    #[test]
+    fn security_details_rows_and_close_are_hittable() {
+        let theme = Theme::light();
+        let size = Size::new(1280.0, 680.0);
+        let layout = security_details_layout(size, &theme, 3);
+        assert_eq!(layout.rows.len(), 3);
+        assert!(layout.card.right() <= size.width);
+        assert!(layout.close.right() <= layout.card.right());
+        assert!(layout.closes_at(layout.close.center()));
+        assert!(layout.closes_at(Point::new(4.0, size.height - 4.0)));
+        assert!(!layout.closes_at(layout.rows[0].center()));
+    }
+
+    #[test]
+    fn security_details_paint_without_panic() {
+        use libluna_render::{Scene, TextEngine};
+        let theme = Theme::light();
+        let text = TextEngine::none();
+        let mut scene = Scene::new();
+        let mut ctx = PaintCtx::new(&mut scene, &theme, &text);
+        let layout = security_details_layout(Size::new(1280.0, 680.0), &theme, 2);
+        let rows = [
+            SecurityDetailRow {
+                icon: IconName::Microphone,
+                app: "Firefox",
+                capability: &tr("Microphone"),
+                remote: None,
+                status: &tr("Allowed"),
+                color: theme.colors.dim_text,
+            },
+            SecurityDetailRow {
+                icon: IconName::Globe,
+                app: "Zed",
+                capability: &tr("Remote server"),
+                remote: Some("1.1.1.1:443"),
+                status: &tr("Awaiting consent"),
+                color: theme.colors.accent,
+            },
+        ];
+        paint_security_details(
+            &mut ctx,
+            &layout,
+            &rows,
+            &tr("No activity"),
+            &tr("Dismiss"),
+            true,
+        );
         assert!(!scene.is_empty());
     }
 }

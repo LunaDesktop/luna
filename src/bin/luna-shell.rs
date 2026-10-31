@@ -76,6 +76,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut security_stamp = luna::security::state_stamp();
     let mut security_check = Instant::now();
     let mut security_hover: Option<panel::SecurityChoice> = None;
+    // Okno szczegółów otwierane kliknięciem w chip wskaźników na pasku.
+    let mut security_details = false;
     // Menu kontekstowe aplikacji w launcherze (PPM) — otwierane nad aktywnym launcherm.
     let mut app_menu: Option<AppMenuState> = None;
     let mut app_menu_hover: Option<usize> = None;
@@ -223,6 +225,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         let security_modal = !security_snapshot.prompts.is_empty();
+        // Modal zgody ma pierwszeństwo — szczegóły chowamy, gdy pojawia się prośba.
+        if security_modal {
+            security_details = false;
+        }
+        let security_row_count = security_snapshot
+            .activities
+            .iter()
+            .map(|a| a.caps.len())
+            .sum::<usize>();
         state.security = panel::SecurityIndicators {
             microphone: security_snapshot.active(luna::security::Capability::Microphone),
             camera: security_snapshot.active(luna::security::Capability::Camera),
@@ -242,7 +253,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         // kursora nie wywołuje wtedy żadnych commitów bufora (patrz `libluna-platform`).
         frame.set_motion_redraw(
             (animating_popup != ActivePopup::None && target_progress > 0.0)
-                || !security_snapshot.prompts.is_empty(),
+                || security_modal
+                || security_details,
         );
 
         if !bus_started {
@@ -593,6 +605,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // Zamknięcie modalna = bezpieczna odmowa; decyzja zostaje zapisana.
                         let _ = luna::security::decide(&prompt.id, false);
                         security_hover = None;
+                    } else if security_details {
+                        security_details = false;
                     } else if app_menu.is_some() {
                         app_menu = None;
                         app_menu_hover = None;
@@ -607,8 +621,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 // Gdy wisi modal zgody, klawiatura nie może sterować launcherem pod spodem.
                 Event::Key(ke)
-                    if ke.state == ButtonState::Pressed
-                        && !security_snapshot.prompts.is_empty() =>
+                    if ke.state == ButtonState::Pressed && (security_modal || security_details) =>
                 {
                     let _ = ke;
                 }
@@ -734,8 +747,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // `se.dy` jest w jednostkach powierzchni (jeden ząbek kółka = `SCROLL_UNIT`).
                 // Lista/siatka przewija się płynnie w pikselach; karuzela skacze o kartę.
                 Event::Scroll(se) => {
-                    // Modal zgody blokuje przewijanie treści pod spodem.
-                    if !security_snapshot.prompts.is_empty() {
+                    // Modal zgody albo okno szczegółów blokuje przewijanie treści pod spodem.
+                    if security_modal || security_details {
                         let _ = se;
                         continue;
                     }
@@ -1105,12 +1118,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                             continue;
                         }
                     }
+                    // Okno szczegółów bezpieczeństwa: zamyka je przycisk albo klik poza kartą.
+                    if security_details {
+                        let layout =
+                            panel::security_details_layout(size, &frame.theme, security_row_count);
+                        if layout.closes_at(pos) {
+                            security_details = false;
+                        }
+                        continue;
+                    }
                     let in_bar = pos.y >= bar.y() && pos.y <= bar.bottom();
                     let is_burger = in_bar && pos.x >= bar.x() && pos.x <= burger.right() + 8.0;
                     let is_clock =
                         in_bar && pos.x >= clock_r.x() - 4.0 && pos.x <= clock_r.right() + 4.0;
                     let is_quick =
                         in_bar && panel::quick_button_rect(bar, theme, text, &state).contains(pos);
+                    let security_chip =
+                        panel::security_chip_rect(bar, clock_r, theme, text, &state);
+                    let is_security = in_bar && security_chip.is_some_and(|r| r.contains(pos));
 
                     // Gdy któreś menu jest otwarte (lub animowane)
                     if animating_popup != ActivePopup::None && target_progress > 0.0 {
@@ -1546,7 +1571,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         if !handled {
                             // Sprawdzamy, czy kliknięto przycisk na pasku (przełączenie lub zamknięcie)
-                            if is_burger {
+                            if is_security {
+                                security_details = true;
+                                target_progress = 0.0;
+                            } else if is_burger {
                                 if animating_popup == ActivePopup::Launcher {
                                     target_progress = 0.0;
                                 } else {
@@ -1642,7 +1670,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     } else {
                         // Żaden popup nie jest otwarty — standardowa obsługa paska
-                        if is_burger {
+                        if is_security {
+                            security_details = true;
+                        } else if is_burger {
                             let max = panel::launcher_scroll_max(
                                 &apps,
                                 &launcher,
@@ -1829,8 +1859,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         // kliknięcie poza obrysem (puste tło, inny monitor, dolna część ekranu) trafia
         // do powłoki i zamyka popup, zamiast aktywować okno pod spodem. Ustawiamy to
         // **po** obsłudze zdarzeń, żeby zmiana działała już w tej samej klatce.
-        let popup_open =
-            (animating_popup != ActivePopup::None && target_progress > 0.0) || security_modal;
+        let popup_open = (animating_popup != ActivePopup::None && target_progress > 0.0)
+            || security_modal
+            || security_details;
         let clock_widget_rect_now = if popup_open {
             None
         } else {
@@ -2004,6 +2035,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 None
             };
+        let security_chip_hover = hp.is_some_and(|p| {
+            panel::security_chip_rect(bar, clock_r, theme, text, &state)
+                .is_some_and(|r| r.contains(p))
+        });
+        let security_details_hover = if security_details {
+            let layout = panel::security_details_layout(size, theme, security_row_count);
+            hp.is_some_and(|p| layout.close.contains(p))
+        } else {
+            false
+        };
         let hover_targets = (
             panel_hover,
             launcher_view_hover,
@@ -2042,6 +2083,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             apps_stamp,
             security_stamp,
             security_hover.map(|c| c as usize + 1).unwrap_or(0),
+            usize::from(security_details),
+            usize::from(security_chip_hover),
+            usize::from(security_details_hover),
         );
         let changed = sig != last_sig || menu_sig != last_menu_sig;
         let animating =
@@ -2383,6 +2427,31 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
         }
 
+        // Szczegóły bezpieczeństwa — tylko informacyjnie; modal zgody ma pierwszeństwo.
+        if security_details && !security_modal {
+            let rows = security_detail_rows(&security_snapshot, &frame.theme);
+            let layout = panel::security_details_layout(size, &frame.theme, rows.len());
+            let views: Vec<panel::SecurityDetailRow<'_>> = rows
+                .iter()
+                .map(|row| panel::SecurityDetailRow {
+                    icon: row.icon,
+                    app: &row.app,
+                    capability: &row.capability,
+                    remote: row.remote.as_deref(),
+                    status: &row.status,
+                    color: row.color,
+                })
+                .collect();
+            panel::paint_security_details(
+                &mut ctx,
+                &layout,
+                &views,
+                &libluna_i18n::tr("No activity"),
+                &libluna_i18n::tr("Dismiss"),
+                security_details_hover,
+            );
+        }
+
         // Schowek aktualizujemy dopiero tutaj: wcześniej `theme`/`ctx` pożyczają
         // `frame`, a `copy_to_clipboard` potrzebuje wyłącznego dostępu.
         if let Some(text) = clipboard_pending.take() {
@@ -2413,8 +2482,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             .is_some_and(|activity| activity.has_activity(clock_now));
         let keep_alive = if widget_live {
             std::time::Duration::from_millis(250)
-        } else if security_modal {
-            // Modal zgody: podświetlenie przycisków i szybka reakcja na decyzję.
+        } else if security_modal || security_details {
+            // Modal zgody / szczegóły: podświetlenie przycisków i szybka reakcja.
             std::time::Duration::from_millis(250)
         } else if activity_exists {
             // Aplikacja może właśnie zamknąć się z aktywnym licznikiem.
@@ -3342,6 +3411,47 @@ fn keysym_to_char(keysym: u32) -> Option<char> {
         0x01000000..=0x0110ffff => char::from_u32(keysym - 0x01000000),
         _ => None,
     }
+}
+
+/// Wiersz okna szczegółów bezpieczeństwa (teksty już przetłumaczone).
+struct SecurityRowData {
+    icon: IconName,
+    app: String,
+    capability: String,
+    remote: Option<String>,
+    status: String,
+    color: libluna_core::Color,
+}
+
+fn security_detail_rows(
+    snapshot: &luna::security::Snapshot,
+    theme: &libluna_core::Theme,
+) -> Vec<SecurityRowData> {
+    use luna::security::{Capability, Status};
+    let mut rows = Vec::new();
+    for activity in &snapshot.activities {
+        for capability in &activity.caps {
+            let (icon, label) = match capability {
+                Capability::Microphone => (IconName::Microphone, libluna_i18n::tr("Microphone")),
+                Capability::Camera => (IconName::Camera, libluna_i18n::tr("Camera")),
+                Capability::Network => (IconName::Globe, libluna_i18n::tr("Remote server")),
+            };
+            let (status, color) = match activity.status {
+                Status::Allowed => (libluna_i18n::tr("Allowed"), theme.colors.dim_text),
+                Status::Ask => (libluna_i18n::tr("Awaiting consent"), theme.colors.accent),
+                Status::Denied => (libluna_i18n::tr("Denied"), theme.colors.error),
+            };
+            rows.push(SecurityRowData {
+                icon,
+                app: activity.name.clone(),
+                capability: label,
+                remote: activity.remote.clone(),
+                status,
+                color,
+            });
+        }
+    }
+    rows
 }
 
 #[cfg(test)]
