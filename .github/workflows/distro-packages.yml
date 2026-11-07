@@ -1,0 +1,196 @@
+name: Distro packages
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        required: true
+        type: string
+      description:
+        required: true
+        type: string
+      version:
+        required: false
+        type: string
+        default: ""
+      binaries:
+        required: false
+        type: string
+        default: ""
+      files:
+        required: false
+        type: string
+        default: ""
+      build:
+        required: false
+        type: string
+        default: "cargo build --release --locked --bins"
+      branding:
+        required: false
+        type: boolean
+        default: false
+      deb_depends:
+        required: false
+        type: string
+        default: "libc6,libxkbcommon0,libxcursor1,libwayland-client0"
+      rpm_depends:
+        required: false
+        type: string
+        default: "glibc,libxkbcommon,libXcursor,libwayland-client"
+      arch_depends:
+        required: false
+        type: string
+        default: "glibc,libxkbcommon,libxcursor,wayland"
+      license:
+        required: false
+        type: string
+        default: "GPL-3.0-or-later"
+      url:
+        required: false
+        type: string
+        default: "https://luna.paganlinux.eu"
+
+jobs:
+  packages:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      PKG: ${{ inputs.package }}
+      DESC: ${{ inputs.description }}
+      LICENSE: ${{ inputs.license }}
+      PKG_URL: ${{ inputs.url }}
+      DEB_DEPS: ${{ inputs.deb_depends }}
+      RPM_DEPS: ${{ inputs.rpm_depends }}
+      ARCH_DEPS: ${{ inputs.arch_depends }}
+      BINARIES: ${{ inputs.binaries }}
+      FILES: ${{ inputs.files }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Branding
+        if: ${{ inputs.branding }}
+        run: |
+          git clone --depth 1 https://github.com/LunaDesktop/branding.git "$RUNNER_TEMP/branding"
+          mkdir -p "$GITHUB_WORKSPACE/../assets/branding"
+          cp "$RUNNER_TEMP/branding/wallpapers/paganlinux.png" "$GITHUB_WORKSPACE/../assets/branding/"
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config ca-certificates curl \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libxcursor-dev libfontconfig1-dev libfreetype6-dev \
+            zstd
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: ${{ inputs.build }}
+
+      - name: Version
+        id: version
+        run: |
+          v="${{ inputs.version }}"
+          if [ -z "$v" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+              v="${GITHUB_REF_NAME#v}"
+            else
+              v="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+            fi
+          fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "Building packages for $PKG $v"
+
+      - name: Stage files
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          : > "$RUNNER_TEMP/contents.yml"
+          add() {
+            local src="$1" dst="$2" mode="${3:-644}"
+            [ -f "$src" ] || { echo "missing: $src" >&2; exit 1; }
+            mkdir -p "$STAGE$(dirname "$dst")"
+            cp -a "$src" "$STAGE$dst"
+            chmod "$mode" "$STAGE$dst"
+            {
+              echo "  - src: $STAGE$dst"
+              echo "    dst: $dst"
+              echo "    file_info:"
+              echo "      mode: 0$mode"
+            } >> "$RUNNER_TEMP/contents.yml"
+          }
+          for bin in $BINARIES; do
+            add "target/release/$bin" "/usr/bin/$bin" 755
+          done
+          while IFS=: read -r src dst mode; do
+            [ -z "${src:-}" ] && continue
+            mode="${mode:-644}"
+            if [ "${dst%/}" != "$dst" ]; then
+              for file in $src; do add "$file" "${dst}$(basename "$file")" "$mode"; done
+            else
+              add "$src" "$dst" "$mode"
+            fi
+          done <<< "$FILES"
+
+      - name: nfpm config
+        run: |
+          set -euo pipefail
+          list() { printf '%s\n' "$1" | tr ',' '\n' | sed '/^$/d;s/^/      - /'; }
+          {
+            echo "name: $PKG"
+            echo "arch: amd64"
+            echo "platform: linux"
+            echo "version: \"${{ steps.version.outputs.value }}\""
+            echo "section: x11"
+            echo "priority: optional"
+            echo "maintainer: Luna contributors <dev@luna.paganlinux.eu>"
+            echo "description: \"$DESC\""
+            echo "license: \"$LICENSE\""
+            echo "homepage: \"$PKG_URL\""
+            echo "overrides:"
+            echo "  deb:"
+            echo "    depends:"
+            list "$DEB_DEPS"
+            echo "  rpm:"
+            echo "    depends:"
+            list "$RPM_DEPS"
+            echo "  archlinux:"
+            echo "    depends:"
+            list "$ARCH_DEPS"
+            echo "contents:"
+            cat "$RUNNER_TEMP/contents.yml"
+          } > "$RUNNER_TEMP/nfpm.yaml"
+          cat "$RUNNER_TEMP/nfpm.yaml"
+
+      - name: Build .deb, .rpm and Arch package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          curl -fsSL -o "$RUNNER_TEMP/nfpm.tgz" \
+            https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_Linux_x86_64.tar.gz
+          tar -xzf "$RUNNER_TEMP/nfpm.tgz" -C "$RUNNER_TEMP" nfpm
+          for format in deb rpm archlinux; do
+            "$RUNNER_TEMP/nfpm" package -f "$RUNNER_TEMP/nfpm.yaml" -p "$format" -t dist/
+          done
+          ls -l dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.package }}-packages
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
