@@ -16,8 +16,10 @@ use std::error::Error;
 use std::process::Command;
 use std::time::Instant;
 
+use libluna_core::civil::CivilDate;
 use libluna_core::clock_state::{self, ClockActivity};
 use libluna_core::{ButtonState, Event, IconSettings, PointerButton, Rect, ThemePreference};
+use libluna_i18n::date_format::DateFormat;
 use libluna_platform::{run, AppConfig, Frame, InputRegion, LayerConfig};
 use libluna_widgets::{Hover, IconName, PaintCtx};
 use luna::calendar;
@@ -121,6 +123,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Harmonogram motywu z `luna-clock` działa również przy zamkniętej aplikacji.
     let mut theme_schedule = ThemeSchedule::load();
     let mut theme_schedule_stamp = ThemeSchedule::stamp();
+
+    // Data na pasku w formacie wybranym w Ustawieniach zegara (`clock.conf`).
+    let mut date_format = DateFormat::load();
+    let mut date_format_checked = Instant::now();
 
     // Dźwięk
     let mut volume_pct: u8 = 80;
@@ -387,8 +393,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // Zegar i data
-        let (clock, date, today_year, today_month, today_day) = now_clock_full();
+        // Zegar i data — format z Ustawień zegara (ten sam `clock.conf`).
+        if date_format_checked.elapsed() >= std::time::Duration::from_secs(2) {
+            date_format_checked = Instant::now();
+            date_format = DateFormat::load();
+        }
+        let (clock, date, today_year, today_month, today_day) = now_clock_full(&date_format);
         state.clock = clock;
         state.date = date;
 
@@ -3431,7 +3441,12 @@ fn apps_log() -> Option<std::fs::File> {
 fn log_apps(msg: &str) {
     use std::io::Write;
     if let Some(mut f) = apps_log() {
-        let _ = writeln!(f, "{} luna-shell: {}", now_clock_full().0, msg);
+        let _ = writeln!(
+            f,
+            "{} luna-shell: {}",
+            now_clock_full(&DateFormat::default()).0,
+            msg
+        );
     }
 }
 
@@ -3473,7 +3488,7 @@ fn open_calendar_app(year: i64, month: u32, day: Option<u32>) {
     }
 }
 
-fn now_clock_full() -> (String, String, i64, u32, u32) {
+fn now_clock_full(format: &DateFormat) -> (String, String, i64, u32, u32) {
     let t = unsafe { libc::time(std::ptr::null_mut()) };
     let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
     let res = unsafe { libc::localtime_r(&t, tm.as_mut_ptr()) };
@@ -3486,7 +3501,7 @@ fn now_clock_full() -> (String, String, i64, u32, u32) {
         let d = tm.tm_mday as u32;
         (
             format!("{h:02}:{m:02}"),
-            format!("{d:02}.{mo:02}"),
+            format.full(CivilDate::from_ymd(y as i32, mo, d)),
             y,
             mo,
             d,
@@ -3499,7 +3514,7 @@ fn now_clock_full() -> (String, String, i64, u32, u32) {
         let (y, mo, d) = civil_from_days(days);
         (
             format!("{h:02}:{m:02}"),
-            format!("{d:02}.{mo:02}"),
+            format.full(CivilDate::from_ymd(y as i32, mo, d)),
             y,
             mo,
             d,
