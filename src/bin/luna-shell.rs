@@ -34,9 +34,6 @@ use luna::theme_schedule::ThemeSchedule;
 /// Wysokość powierzchni „chrome” (pasek + launcher + OSD/powiadomienia).
 const CHROME_H: u32 = 680;
 
-/// Jednostka przewijania w `wl_pointer.axis`: jeden „ząbek” kółka = tyle pikseli
-/// powierzchni (patrz `selene::seat::WHEEL_STEP_PX`). Musi być z tym zgodna.
-const SCROLL_UNIT: f64 = 20.0;
 /// O ile pikseli przewijamy listę/siatkę launchera za jeden ząbek kółka.
 /// ~64 px to około jeden wiersz listy — jedno kliknięcie kółka = jeden wiersz.
 const LAUNCHER_SCROLL_PER_NOTCH: f64 = 64.0;
@@ -744,7 +741,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
 
                 // 1) Przewijanie listy lub kart w launcherze.
-                // `se.dy` jest w jednostkach powierzchni (jeden ząbek kółka = `SCROLL_UNIT`).
+                // `se.notches_y()` przelicza piksele z platformy na „ząbki” kółka.
                 // Lista/siatka przewija się płynnie w pikselach; karuzela skacze o kartę.
                 Event::Scroll(se) => {
                     // Modal zgody albo okno szczegółów blokuje przewijanie treści pod spodem.
@@ -757,7 +754,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         app_menu = None;
                         app_menu_hover = None;
                     }
-                    let notches = se.dy / SCROLL_UNIT;
+                    let notches = se.notches_y();
                     let vertical = se.dy.abs() >= se.dx.abs();
                     let dir = if vertical { se.dy } else { se.dx };
                     if animating_popup == ActivePopup::Launcher && target_progress > 0.0 {
