@@ -473,9 +473,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             frame.size.height.max(1.0),
         )]));
         app.paint_in_frame(frame, &placed);
-        if app.menu.is_some() || app.press.is_some() {
-            frame.set_motion_redraw(true);
-        }
+        // Podświetlenie ikony pod kursorem i podgląd przeciągania wymagają
+        // klatki na ruch wskaźnika. Gdy scena się nie zmienia, warstwa rysowania
+        // i tak pomija rasteryzację (porównanie scen), więc to jest tanie.
+        frame.set_motion_redraw(true);
         frame.request_frame_after(RESCAN_EVERY);
     })
 }
