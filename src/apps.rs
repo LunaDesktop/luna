@@ -222,6 +222,15 @@ pub fn parse(content: &str, lang: Option<&str>) -> Option<DesktopApp> {
     })
 }
 
+/// Polecenie `Exec` z pliku `.desktop` (po usunięciu kodów pól).
+///
+/// Używane jako awaryjna ścieżka uruchamiania ikony pulpitu, gdy `gio launch`
+/// nie jest dostępne.
+pub fn desktop_exec(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    parse(&text, None).map(|app| app.exec)
+}
+
 /// Skanuje system w poszukiwaniu aplikacji (posortowane po nazwie).
 pub fn scan() -> Vec<DesktopApp> {
     let lang = current_lang();

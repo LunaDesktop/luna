@@ -3813,6 +3813,8 @@ pub enum AppMenuAction {
     Launch,
     /// Dodaj do ulubionych / usuń z ulubionych.
     ToggleFavorite,
+    /// Umieść skrót `.desktop` na pulpicie.
+    AddToDesktop,
     /// Uruchom z uprawnieniami administratora (`pkexec` → agent polkit Luny).
     OpenAsAdmin,
     /// Skopiuj polecenie uruchamiające do schowka.
@@ -3932,6 +3934,7 @@ pub fn paint_app_menu(ctx: &mut PaintCtx, rect: Rect, rows: &[AppMenuRow], hover
         let icon = match action {
             AppMenuAction::Launch => IconName::Play,
             AppMenuAction::ToggleFavorite => IconName::Star,
+            AppMenuAction::AddToDesktop => IconName::Plus,
             AppMenuAction::OpenAsAdmin => IconName::User,
             AppMenuAction::CopyCommand => IconName::Edit,
             AppMenuAction::Uninstall => IconName::Close,

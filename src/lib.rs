@@ -8,13 +8,13 @@
 
 pub mod accounts_service;
 pub mod apps;
-pub mod security;
 pub mod bluetooth;
 pub mod calendar;
 pub mod clock_widget;
 pub mod colors;
 pub mod dbus_notifications;
 pub mod default_apps;
+pub mod desktop;
 pub mod equalizer;
 pub mod keyring;
 pub mod launcher_conf;
@@ -28,6 +28,7 @@ pub mod polkit;
 pub mod power;
 pub mod power_profile;
 pub mod printers;
+pub mod security;
 pub mod sessions;
 pub mod system;
 pub mod theme_schedule;

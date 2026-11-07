@@ -2714,6 +2714,12 @@ fn app_menu_rows(app: &App, pinned: bool) -> Vec<panel::AppMenuRow> {
             enabled: true,
             danger: false,
         },
+        AppMenuRow {
+            label: libluna_i18n::tr("Add to desktop"),
+            action: Some(AppMenuAction::AddToDesktop),
+            enabled: installed,
+            danger: false,
+        },
         AppMenuRow::separator(),
         AppMenuRow {
             label: libluna_i18n::tr("Open as administrator"),
@@ -2779,6 +2785,20 @@ fn perform_app_menu(
         A::ToggleFavorite => {
             launcher.toggle_pin(app);
             luna::launcher_conf::save_from(launcher);
+            AppMenuEffect::None
+        }
+        A::AddToDesktop => {
+            if let Some(path) = &app.desktop_path {
+                // Pierwszy katalog z Ustawień, a gdy go brak — standardowy pulpit.
+                let settings = libluna_core::desktop::DesktopSettings::load();
+                let folder = settings
+                    .folders
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(libluna_core::desktop::desktop_dir);
+                let _ = libluna_core::desktop::add_shortcut_to(path, &folder);
+            }
+            // Launcher zostaje otwarty — użytkownik może dodać kolejne skróty.
             AppMenuEffect::None
         }
         A::OpenAsAdmin => {
