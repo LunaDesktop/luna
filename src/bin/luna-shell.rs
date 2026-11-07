@@ -26,8 +26,9 @@ use luna::dbus_notifications::{Incoming, NotificationsBus};
 use luna::notifications::{load_placement, Notification, Notifications};
 use luna::osd::Osd;
 use luna::panel::{
-    self, ActivePopup, App, CalendarAction, Launcher, LauncherCategory, LauncherSidebarHit,
-    PanelState, Toggle, ToggleAction, WifiAction, LAUNCHER_H, LAUNCHER_W, THICKNESS,
+    self, ActivePopup, App, CalendarAction, IndicatorKind, Launcher, LauncherCategory,
+    LauncherSidebarHit, PanelState, Toggle, ToggleAction, WifiAction, LAUNCHER_H, LAUNCHER_W,
+    THICKNESS,
 };
 use luna::theme_schedule::ThemeSchedule;
 
@@ -89,6 +90,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut animating_popup = ActivePopup::None;
     let mut anim_progress: f64 = 0.0;
     let mut target_progress: f64 = 0.0;
+    // Faza migania kursora w polu wyszukiwania launchera.
+    let mut caret_epoch = Instant::now();
     // Menu kontekstowe przycisku taskbara (PPM): zadanie, etykiety i akcje.
     let mut task_menu: Option<TaskMenuState> = None;
     let mut task_menu_hover: Option<usize> = None;
@@ -122,6 +125,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Dźwięk
     let mut volume_pct: u8 = 80;
     let mut volume_muted = false;
+    // Wyjścia audio — odświeżane przy otwarciu panelu dźwięku (wpctl potrafi trwać).
+    let mut sound_sources: Vec<luna::equalizer::Device> = Vec::new();
 
     // Wi-Fi (lista sieci pobierana w tle — `nmcli` potrafi trwać sekundy).
     let wifi_scan = luna::network::WifiScan::spawn();
@@ -146,7 +151,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tray_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut tray_started = false;
 
-    let mut brightness_pct: u8 = 0;
     let mut brightness_state: Option<u8> = None;
     let mut battery_state: Option<luna::system::BatteryStatus> = None;
     let mut bluetooth_state: Option<(bool, usize)> = None;
@@ -477,7 +481,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Ok(sys) = system.lock() {
             state.user = sys.user.clone();
             state.toggles = build_toggles(&sys);
-            brightness_pct = sys.brightness.unwrap_or(0);
             brightness_state = sys.brightness;
             battery_state = sys.battery;
             bluetooth_state = sys.bluetooth;
@@ -573,6 +576,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         if anim_progress == 0.0 {
             animating_popup = ActivePopup::None;
         }
+        state.active_indicator = match (animating_popup, target_progress > 0.0) {
+            (ActivePopup::Volume, true) => Some(IndicatorKind::Volume),
+            (ActivePopup::Wifi, true) => Some(IndicatorKind::Network),
+            (ActivePopup::Notifications, true) => Some(IndicatorKind::Notifications),
+            (ActivePopup::Quick, true) => Some(IndicatorKind::User),
+            _ => None,
+        };
+        launcher.caret_visible =
+            ((Instant::now().duration_since(caret_epoch).as_millis() / 530) % 2) == 0;
 
         let lw = LAUNCHER_W.min((size.width - 80.0).max(320.0));
         let larea = Rect::from_xywh((size.width - lw) / 2.0, THICKNESS + 24.0, lw, LAUNCHER_H);
@@ -892,9 +904,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // Podświetlenie wiersza w centrum powiadomień (obok kalendarza).
+                // Podświetlenie wiersza w centrum powiadomień (dzwonek na pasku).
                 Event::PointerMotion { position, .. }
-                    if animating_popup == ActivePopup::Calendar && target_progress > 0.0 =>
+                    if animating_popup == ActivePopup::Notifications && target_progress > 0.0 =>
                 {
                     let nrect =
                         panel::notification_center_rect(bar, &frame.theme, notes.history_len());
@@ -1130,8 +1142,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let is_burger = in_bar && pos.x >= bar.x() && pos.x <= burger.right() + 8.0;
                     let is_clock =
                         in_bar && pos.x >= clock_r.x() - 4.0 && pos.x <= clock_r.right() + 4.0;
-                    let is_quick =
-                        in_bar && panel::quick_button_rect(bar, theme, text, &state).contains(pos);
+                    let clicked_indicator = in_bar
+                        .then(|| panel::indicator_at(bar, theme, pos))
+                        .flatten();
                     let security_chip =
                         panel::security_chip_rect(bar, clock_r, theme, text, &state);
                     let is_security = in_bar && security_chip.is_some_and(|r| r.contains(pos));
@@ -1307,7 +1320,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             // Suwak jest aktywny tylko przy realnym podświetleniu.
                                             if brightness_state.is_some() {
                                                 luna::system::set_brightness(v);
-                                                brightness_pct = v;
                                                 brightness_state = Some(v);
                                             }
                                         }
@@ -1345,6 +1357,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             target_progress = 0.0;
                                         }
                                     }
+                                    handled = true;
+                                } else if qrect.contains(pos) {
+                                    // Klik we wnętrze panelu nie zamyka go — dopiero klik poza.
                                     handled = true;
                                 }
                             }
@@ -1413,7 +1428,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     .contains(pos)
                                 {
                                     // Klik w pole wyszukiwania tylko ustawia fokus —
-                                    // nigdy nie zamyka launchera.
+                                    // nigdy nie zamyka launchera; kursor mruga od nowa.
+                                    caret_epoch = Instant::now();
+                                    launcher.caret_visible = true;
                                     handled = true;
                                 } else if let Some(v) =
                                     panel::launcher_view_at(larea, &frame.theme, text, pos)
@@ -1500,6 +1517,49 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             ActivePopup::Calendar => {
                                 let crect = panel::calendar_popup_rect(bar, &frame.theme);
+                                if crect.contains(pos) {
+                                    if let Some(act) = panel::calendar_popup_hit(
+                                        crect,
+                                        &frame.theme,
+                                        pos,
+                                        cal_year,
+                                        cal_month,
+                                    ) {
+                                        match act {
+                                            CalendarAction::PrevMonth => {
+                                                if cal_month == 1 {
+                                                    cal_month = 12;
+                                                    cal_year -= 1;
+                                                } else {
+                                                    cal_month -= 1;
+                                                }
+                                            }
+                                            CalendarAction::NextMonth => {
+                                                if cal_month == 12 {
+                                                    cal_month = 1;
+                                                    cal_year += 1;
+                                                } else {
+                                                    cal_month += 1;
+                                                }
+                                            }
+                                            CalendarAction::SelectDay(d) => {
+                                                cal_selected = Some(d);
+                                            }
+                                            CalendarAction::OpenApp => {
+                                                let day = cal_selected.or_else(|| {
+                                                    (cal_year == today_year
+                                                        && cal_month == today_month)
+                                                        .then_some(today_day)
+                                                });
+                                                open_calendar_app(cal_year, cal_month, day);
+                                                target_progress = 0.0;
+                                            }
+                                        }
+                                    }
+                                    handled = true;
+                                }
+                            }
+                            ActivePopup::Notifications => {
                                 let nrect = panel::notification_center_rect(
                                     bar,
                                     &frame.theme,
@@ -1552,45 +1612,52 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         None => {}
                                     }
                                     handled = true;
-                                } else if crect.contains(pos) {
-                                    if let Some(act) = panel::calendar_popup_hit(
-                                        crect,
-                                        &frame.theme,
-                                        pos,
-                                        cal_year,
-                                        cal_month,
-                                    ) {
-                                        match act {
-                                            CalendarAction::PrevMonth => {
-                                                if cal_month == 1 {
-                                                    cal_month = 12;
-                                                    cal_year -= 1;
-                                                } else {
-                                                    cal_month -= 1;
-                                                }
-                                            }
-                                            CalendarAction::NextMonth => {
-                                                if cal_month == 12 {
-                                                    cal_month = 1;
-                                                    cal_year += 1;
-                                                } else {
-                                                    cal_month += 1;
-                                                }
-                                            }
-                                            CalendarAction::SelectDay(d) => {
-                                                cal_selected = Some(d);
-                                            }
-                                            CalendarAction::OpenApp => {
-                                                let day = cal_selected.or_else(|| {
-                                                    (cal_year == today_year
-                                                        && cal_month == today_month)
-                                                        .then_some(today_day)
-                                                });
-                                                open_calendar_app(cal_year, cal_month, day);
-                                                target_progress = 0.0;
+                                }
+                            }
+                            ActivePopup::Volume => {
+                                let vrect = panel::volume_popup_rect(
+                                    bar,
+                                    &frame.theme,
+                                    sound_sources.len(),
+                                );
+                                if let Some(act) = panel::volume_popup_hit(
+                                    vrect,
+                                    &frame.theme,
+                                    pos,
+                                    sound_sources.len(),
+                                ) {
+                                    match act {
+                                        panel::VolumeAction::SetLevel(v) => {
+                                            luna::system::set_volume(v);
+                                            volume_pct = v;
+                                        }
+                                        panel::VolumeAction::StepDown => {
+                                            let v = volume_pct.saturating_sub(5);
+                                            luna::system::set_volume(v);
+                                            volume_pct = v;
+                                        }
+                                        panel::VolumeAction::StepUp => {
+                                            let v = (volume_pct + 5).min(100);
+                                            luna::system::set_volume(v);
+                                            volume_pct = v;
+                                        }
+                                        panel::VolumeAction::ToggleMute => {
+                                            luna::system::toggle_mute();
+                                            volume_muted = !volume_muted;
+                                        }
+                                        panel::VolumeAction::SelectSource(index) => {
+                                            if let Some(device) = sound_sources.get(index) {
+                                                luna::equalizer::set_default(device.id);
+                                                sound_sources = luna::equalizer::status()
+                                                    .hardware_sinks()
+                                                    .cloned()
+                                                    .collect();
                                             }
                                         }
                                     }
+                                    handled = true;
+                                } else if vrect.contains(pos) {
+                                    // Klik we wnętrze panelu (poza kontrolkami) go nie zamyka.
                                     handled = true;
                                 }
                             }
@@ -1607,6 +1674,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     target_progress = 0.0;
                                 } else {
                                     animating_popup = ActivePopup::Launcher;
+                                    caret_epoch = Instant::now();
                                     target_progress = 1.0;
                                 }
                             } else if is_clock {
@@ -1621,12 +1689,46 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     // Otwarcie centrum = powiadomienia uznane za obejrzane.
                                     unseen = 0;
                                 }
-                            } else if is_quick {
-                                if animating_popup == ActivePopup::Quick {
-                                    target_progress = 0.0;
-                                } else {
-                                    animating_popup = ActivePopup::Quick;
-                                    target_progress = 1.0;
+                            } else if let Some(kind) = clicked_indicator {
+                                match kind {
+                                    IndicatorKind::Volume => {
+                                        sound_sources = luna::equalizer::status()
+                                            .hardware_sinks()
+                                            .cloned()
+                                            .collect();
+                                        if animating_popup == ActivePopup::Volume {
+                                            target_progress = 0.0;
+                                        } else {
+                                            animating_popup = ActivePopup::Volume;
+                                            target_progress = 1.0;
+                                        }
+                                    }
+                                    IndicatorKind::Network => {
+                                        wifi_scan.refresh();
+                                        if animating_popup == ActivePopup::Wifi {
+                                            target_progress = 0.0;
+                                        } else {
+                                            animating_popup = ActivePopup::Wifi;
+                                            target_progress = 1.0;
+                                        }
+                                    }
+                                    IndicatorKind::Notifications => {
+                                        if animating_popup == ActivePopup::Notifications {
+                                            target_progress = 0.0;
+                                        } else {
+                                            animating_popup = ActivePopup::Notifications;
+                                            target_progress = 1.0;
+                                            unseen = 0;
+                                        }
+                                    }
+                                    IndicatorKind::User => {
+                                        if animating_popup == ActivePopup::Quick {
+                                            target_progress = 0.0;
+                                        } else {
+                                            animating_popup = ActivePopup::Quick;
+                                            target_progress = 1.0;
+                                        }
+                                    }
                                 }
                             } else if let Some(hit) =
                                 panel::tray_at(bar, &frame.theme, text, &state, pos)
@@ -1642,39 +1744,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                                 bus.activate(&item, pos.x as i32, pos.y as i32)
                                             });
                                         }
-                                    }
-                                }
-                            } else if let Some(i) =
-                                panel::toggle_at(bar, &frame.theme, text, &state, pos)
-                            {
-                                match state.toggles[i].action {
-                                    ToggleAction::Wifi => {
-                                        wifi_scan.refresh();
-                                        animating_popup = ActivePopup::Wifi;
-                                        target_progress = 1.0;
-                                    }
-                                    ToggleAction::Volume => {
-                                        animating_popup = ActivePopup::Quick;
-                                        target_progress = 1.0;
-                                    }
-                                    ToggleAction::Brightness => {
-                                        let next =
-                                            luna::system::next_brightness_level(brightness_pct);
-                                        luna::system::set_brightness(next);
-                                        brightness_pct = next;
-                                        brightness_state = Some(next);
-                                        osd.icon = IconName::Brightness;
-                                        osd.show(
-                                            libluna_i18n::tr("Brightness"),
-                                            next as f64 / 100.0,
-                                        );
-                                        target_progress = 0.0;
-                                    }
-                                    // Bateria i inne wskaźniki statusu również otwierają
-                                    // wspólny panel sterowania.
-                                    ToggleAction::None => {
-                                        animating_popup = ActivePopup::Quick;
-                                        target_progress = 1.0;
                                     }
                                 }
                             } else if let Some(i) =
@@ -1710,6 +1779,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                             launcher.scroll = launcher.scroll.clamp(0.0, max);
                             animating_popup = ActivePopup::Launcher;
+                            caret_epoch = Instant::now();
                             target_progress = 1.0;
                         } else if is_clock {
                             cal_year = today_year;
@@ -1718,9 +1788,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                             animating_popup = ActivePopup::Calendar;
                             target_progress = 1.0;
                             unseen = 0;
-                        } else if is_quick {
-                            animating_popup = ActivePopup::Quick;
-                            target_progress = 1.0;
+                        } else if let Some(kind) = clicked_indicator {
+                            match kind {
+                                IndicatorKind::Volume => {
+                                    sound_sources = luna::equalizer::status()
+                                        .hardware_sinks()
+                                        .cloned()
+                                        .collect();
+                                    animating_popup = ActivePopup::Volume;
+                                    target_progress = 1.0;
+                                }
+                                IndicatorKind::Network => {
+                                    wifi_scan.refresh();
+                                    animating_popup = ActivePopup::Wifi;
+                                    target_progress = 1.0;
+                                }
+                                IndicatorKind::Notifications => {
+                                    animating_popup = ActivePopup::Notifications;
+                                    target_progress = 1.0;
+                                    unseen = 0;
+                                }
+                                IndicatorKind::User => {
+                                    animating_popup = ActivePopup::Quick;
+                                    target_progress = 1.0;
+                                }
+                            }
                         } else if let Some(hit) =
                             panel::tray_at(bar, &frame.theme, text, &state, pos)
                         {
@@ -1735,32 +1827,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             bus.activate(&item, pos.x as i32, pos.y as i32)
                                         });
                                     }
-                                }
-                            }
-                        } else if let Some(i) =
-                            panel::toggle_at(bar, &frame.theme, text, &state, pos)
-                        {
-                            match state.toggles[i].action {
-                                ToggleAction::Wifi => {
-                                    wifi_scan.refresh();
-                                    animating_popup = ActivePopup::Wifi;
-                                    target_progress = 1.0;
-                                }
-                                ToggleAction::Volume => {
-                                    animating_popup = ActivePopup::Quick;
-                                    target_progress = 1.0;
-                                }
-                                ToggleAction::Brightness => {
-                                    let next = luna::system::next_brightness_level(brightness_pct);
-                                    luna::system::set_brightness(next);
-                                    brightness_pct = next;
-                                    brightness_state = Some(next);
-                                    osd.icon = IconName::Brightness;
-                                    osd.show(libluna_i18n::tr("Brightness"), next as f64 / 100.0);
-                                }
-                                ToggleAction::None => {
-                                    animating_popup = ActivePopup::Quick;
-                                    target_progress = 1.0;
                                 }
                             }
                         } else if let Some(i) =
@@ -2014,10 +2080,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         let panel_hover = (
             hp.is_some_and(|p| burger.contains(p)),
             hp.is_some_and(|p| clock_r.contains(p)),
-            hp.is_some_and(|p| panel::quick_button_rect(bar, theme, text, &state).contains(p)),
+            hp.is_some_and(|p| panel::indicator_at(bar, theme, p).is_some()),
             hp.and_then(|p| panel::task_at(bar, theme, text, &state.tasks, p)),
             hp.and_then(|p| panel::workspace_at(bar, theme, text, &state, p)),
-            hp.and_then(|p| panel::toggle_at(bar, theme, text, &state, p)),
+            hp.and_then(|p| panel::indicator_at(bar, theme, p)),
             hp.and_then(|p| panel::tray_at(bar, theme, text, &state, p)),
         );
         let launcher_open = animating_popup == ActivePopup::Launcher && target_progress > 0.0;
@@ -2288,9 +2354,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                         holiday_country.unwrap_or(""),
                         true,
                     );
+                }
+                ActivePopup::Notifications => {
+                    let slide = (1.0 - anim_progress) * -10.0;
                     let nrect =
                         panel::notification_center_rect(bar, &frame.theme, notes.history_len());
-                    let cur_nrect = Rect::from_xywh(
+                    let cur = Rect::from_xywh(
                         nrect.x(),
                         nrect.y() + slide,
                         nrect.width(),
@@ -2298,10 +2367,34 @@ fn main() -> Result<(), Box<dyn Error>> {
                     );
                     panel::paint_notification_center(
                         &mut ctx,
-                        cur_nrect,
+                        cur,
                         notes.history(),
                         dnd,
                         notify_hover,
+                    );
+                }
+                ActivePopup::Volume => {
+                    let slide = (1.0 - anim_progress) * -10.0;
+                    let vrect = panel::volume_popup_rect(bar, &frame.theme, sound_sources.len());
+                    let cur = Rect::from_xywh(
+                        vrect.x(),
+                        vrect.y() + slide,
+                        vrect.width(),
+                        vrect.height(),
+                    );
+                    let names: Vec<String> = sound_sources
+                        .iter()
+                        .map(|d| d.description.clone())
+                        .collect();
+                    let active = sound_sources.iter().position(|d| d.is_default);
+                    panel::paint_volume_popup(
+                        &mut ctx,
+                        cur,
+                        volume_pct,
+                        volume_muted,
+                        &names,
+                        active,
+                        &hover,
                     );
                 }
                 ActivePopup::Quick => {
@@ -2518,8 +2611,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             std::time::Duration::from_millis(500)
         } else if startup.elapsed() < std::time::Duration::from_secs(8) {
             std::time::Duration::from_millis(500)
+        } else if animating_popup == ActivePopup::Launcher {
+            // Migający kursor wyszukiwania (faza 530 ms).
+            std::time::Duration::from_millis(250)
         } else if animating_popup != ActivePopup::None && target_progress > 0.0 {
-            // Otwarty launcher/menu: szybciej wykrywamy zmiany i odświeżamy podświetlenia.
+            // Otwarty panel/menu: szybciej wykrywamy zmiany i odświeżamy podświetlenia.
             std::time::Duration::from_millis(500)
         } else {
             // Instalacja pakietu ma pojawić się w launcherze bez restartu powłoki —

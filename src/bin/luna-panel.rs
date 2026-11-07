@@ -117,8 +117,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     save(&theme, "docs/images/luna-popup-volume.png", |ctx| {
         panel::paint_panel(&st, &hover, ctx, bar);
-        let r = panel::volume_popup_rect(bar, ctx.theme, ctx.text, &st);
-        panel::paint_volume_popup(ctx, r, 65, false, &hover);
+        let r = panel::volume_popup_rect(bar, ctx.theme, 2);
+        panel::paint_volume_popup(ctx, r, 65, false, &["Wbudowane głośniki".to_owned(), "Słuchawki USB".to_owned()], Some(0), &hover);
     })?;
 
     let calendar_events = vec![
