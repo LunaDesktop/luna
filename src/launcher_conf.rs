@@ -111,6 +111,7 @@ mod tests {
             theme_icon: None,
             name: key.to_owned(),
             category: "System".to_owned(),
+            categories: vec!["System".to_owned()],
             exec: None,
             terminal: false,
             desktop_path: None,

@@ -26,8 +26,8 @@ use luna::dbus_notifications::{Incoming, NotificationsBus};
 use luna::notifications::{load_placement, Notification, Notifications};
 use luna::osd::Osd;
 use luna::panel::{
-    self, ActivePopup, App, CalendarAction, Launcher, PanelState, Toggle, ToggleAction, WifiAction,
-    LAUNCHER_H, LAUNCHER_W, THICKNESS,
+    self, ActivePopup, App, CalendarAction, Launcher, LauncherCategory, LauncherSidebarHit,
+    PanelState, Toggle, ToggleAction, WifiAction, LAUNCHER_H, LAUNCHER_W, THICKNESS,
 };
 use luna::theme_schedule::ThemeSchedule;
 
@@ -673,13 +673,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         0xff08 => {
                             // BackSpace — usuwa znak z pola wyszukiwania
                             launcher.search.pop();
+                            launcher.category = LauncherCategory::All;
                             launcher.scroll = 0.0;
                             launcher.selected = Some(0);
                             launcher.hover = None;
                         }
                         0xff52 | 0xff54 => {
                             let dy = if ke.keysym == 0xff52 { -1 } else { 1 };
-                            let count = launcher.filter_apps(&apps).len();
+                            let count = launcher.visible_apps(&apps).len();
                             launcher.navigate(count, 0, dy);
                             panel::ensure_selection_visible_count(
                                 count,
@@ -691,7 +692,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         0xff51 | 0xff53 => {
                             let dx = if ke.keysym == 0xff51 { -1 } else { 1 };
-                            let count = launcher.filter_apps(&apps).len();
+                            let count = launcher.visible_apps(&apps).len();
                             launcher.navigate(count, dx, 0);
                             panel::ensure_selection_visible_count(
                                 count,
@@ -702,7 +703,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                         }
                         0xff0d | 0xff8d => {
-                            let filtered = launcher.filter_apps(&apps);
+                            let filtered = launcher.visible_apps(&apps);
                             if let Some(i) = launcher.selected_index(filtered.len()) {
                                 if let Some(app) = filtered.get(i) {
                                     launch_from_launcher(&mut launcher, app);
@@ -729,6 +730,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 typed = true;
                             }
                             if typed {
+                                launcher.category = LauncherCategory::All;
                                 launcher.scroll = 0.0;
                                 launcher.selected = Some(0);
                                 launcher.hover = None;
@@ -759,7 +761,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let dir = if vertical { se.dy } else { se.dx };
                     if animating_popup == ActivePopup::Launcher && target_progress > 0.0 {
                         if larea.contains(se.position) {
-                            let filtered_len = launcher.filter_apps(&apps).len();
+                            let filtered_len = launcher.visible_apps(&apps).len();
                             if launcher.view == panel::LauncherView::Carousel {
                                 let steps = (notches.round() as i64).clamp(-3, 3);
                                 if steps != 0 {
@@ -1374,6 +1376,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         target_progress = 0.0;
                                     }
                                     handled = true;
+                                } else if let Some(hit) =
+                                    panel::launcher_sidebar_at(larea, &frame.theme, text, pos)
+                                {
+                                    match hit {
+                                        LauncherSidebarHit::Category(category) => {
+                                            launcher.category = category;
+                                            launcher.scroll = 0.0;
+                                            launcher.selected = Some(0);
+                                            launcher.hover = None;
+                                        }
+                                        LauncherSidebarHit::PowerOff => {
+                                            luna::power::perform(
+                                                luna::power::PowerAction::PowerOff,
+                                            );
+                                            target_progress = 0.0;
+                                        }
+                                        LauncherSidebarHit::Logout => {
+                                            luna::power::perform(luna::power::PowerAction::Logout);
+                                            target_progress = 0.0;
+                                        }
+                                    }
+                                    handled = true;
                                 } else if !launcher.search.is_empty()
                                     && panel::launcher_search_clear_at(
                                         larea,
@@ -1383,6 +1407,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     )
                                 {
                                     launcher.clear_search();
+                                    handled = true;
+                                } else if panel::launcher_rects(larea, &frame.theme, text)
+                                    .search
+                                    .contains(pos)
+                                {
+                                    // Klik w pole wyszukiwania tylko ustawia fokus —
+                                    // nigdy nie zamyka launchera.
                                     handled = true;
                                 } else if let Some(v) =
                                     panel::launcher_view_at(larea, &frame.theme, text, pos)
@@ -2678,7 +2709,7 @@ fn reload_apps(apps: &mut Vec<App>, launcher: &mut Launcher, reset: bool) -> boo
         launcher.scroll = 0.0;
         launcher.carousel = 0;
     } else {
-        let len = launcher.filter_apps(apps).len();
+        let len = launcher.visible_apps(apps).len();
         launcher.selected = if len == 0 {
             None
         } else {
@@ -3461,6 +3492,7 @@ mod tests {
             theme_icon: None,
             name: name.to_owned(),
             category: String::new(),
+            categories: Vec::new(),
             exec: Some(exec.to_owned()),
             terminal: false,
             desktop_path: None,
