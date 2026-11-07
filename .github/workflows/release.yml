@@ -63,6 +63,6 @@ jobs:
       files: |
         packaging/luna-portals.conf:/usr/share/xdg-desktop-portal/luna-portals.conf:644
       branding: true
-      deb_depends: "libc6,libxkbcommon0,libxcursor1,libwayland-client0,libx11-6,libdbus-1-3"
-      rpm_depends: "glibc,libxkbcommon,libXcursor,libwayland-client,libX11,dbus-libs"
-      arch_depends: "glibc,libxkbcommon,libxcursor,wayland,libx11,dbus"
+      deb_depends: "libc6,libxkbcommon0,libxcursor1,libwayland-client0,libx11-6,libdbus-1-3,libluna,selene"
+      rpm_depends: "glibc,libxkbcommon,libXcursor,libwayland-client,libX11,dbus-libs,libluna,selene"
+      arch_depends: "glibc,libxkbcommon,libxcursor,wayland,libx11,dbus,libluna,selene"
